@@ -1,0 +1,40 @@
+# NOT_ACCEPTED: offline replay experiment only; production launch does not load it.
+# Consumer: loop_recall_replay ... scheduled. This file records the scheduled
+# profile; the replay selects the same values explicitly by mode. MappingBackend
+# has no wiring for these new scheduling/motion overrides in this experiment.
+experiment_status: NOT_ACCEPTED
+policy_version: v3_scheduled_motion_v1
+replay_mode: scheduled
+loop_pipeline:
+  revisit_verification_enabled: true
+  discovery_interval_keyframes: 3
+  confirmation_min_translation_m: 0.5
+  confirmation_min_rotation_rad: 0.15
+  confirmation_frames: 2
+  confirmation_max_gap: 10
+  origin_keyframe_count: 31
+  origin_top_k: 5
+  hypothesis_group_id_span: 10
+  hypothesis_group_distance_m: 3.0
+  solution_merge_distance_m: 0.5
+  solution_merge_rotation_rad: 0.1
+  distinct_solution_fitness_margin_m: 0.05
+  retry_interval_keyframes: 2
+  retry_max_attempts: 3
+  retry_reset_keyframes: 30
+  queue_capacity: 32
+scan_context:
+  max_distance: 0.2
+loop_validation:
+  maximum_fitness: 0.25
+  minimum_overlap: 0.35
+  minimum_correspondences: 30
+  maximum_translation_jump_m: 5.0
+  maximum_rotation_jump_rad: 1.0
+  minimum_candidate_distance_separation: 0.05
+confirmation_evidence_note: Motion separation does not prove independent structure or correct loop geometry.
+pacing:
+  enable_env: A2W_REPLAY_PACE=1
+  default: false
+  transport: preloaded_memory_source_timestamp_schedule_no_ROS
+  capacity_exceeded: record_FAIL_process_all_frames_save_then_exit_3

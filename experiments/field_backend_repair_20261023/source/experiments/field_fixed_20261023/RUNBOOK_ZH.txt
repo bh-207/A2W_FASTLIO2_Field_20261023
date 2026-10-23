@@ -1,0 +1,169 @@
+固定 LiDAR—IMU 外参现场短闭环试采（2026-10-23）
+
+结果与边界
+已准备独立现场 B 入口，不采用 LIO-SAM。主 install、生产 YAML、164 驱动、旧 Bag、A727 和导航地图不变。
+指定配置：mapping.extrinsic_est_en=false；T=[-0.00862,0.00914,0.03916] m；R=I；offset=0 沿用。
+来源是“用户指定的固定配置”，不是物理标定证明。固定外参不会固定机体姿态，不关闭重力初始化、惯导传播或去畸变。
+P 平面替换、R 新增前端 Huber、J 地面联合更新均未编入本次前端；新增重力软约束不启用。
+保留原有后端保守回环、iSAM2 及其已有 robust kernel；revisit_verification_enabled=false，不放宽回环门槛。
+原生地图为主；本入口不在运行中做地图重力对齐、修平或导航切图。
+
+当前现场阻塞
+本机只读网络快照：Wi-Fi <LOCAL_NETWORK_ADDRESS>；没有192.168.123.x直连地址；到192.168.123.164走FlClash。
+SSH可达性不能证明DDS可用。env.sh会拒绝VPN/默认路由回退。
+接入机器人有线网络，并用已有网络设置获得正确且不冲突的192.168.123.x地址后再执行以下命令。
+脚本不自动改网卡、路由、时钟，不连接SSH，不启动第二套驱动。当前没有现场DDS/校时/机器人运动验收。
+164沿用域0、br0/192.168.123.164的已有驱动。若现场驱动归档约定已变，不能绕过frame/time检查。
+保持机器人静止，关闭其他mapping/localization或相同ROS节点，避免TF所有权/输出端点冲突。
+
+已经核验
+- 独立 build_003：三个需要现场适配的翻译单元编译和链接成功，保留GTSAM依赖修复；滤波、IMU和点云预处理数学源文件不变。
+- 9项新合同回归、75项既有mapping回归通过；shell语法通过。
+- domain87 / localhost-only / TCP127.0.0.1，20秒原始真实Bag短回归：3990 IMU、200点云；不修改传感器和逐点时间。
+- 实际DDS IMU订阅KEEP_LAST100、BEST_EFFORT；实际参数false/指定R/T。
+- INIT_COMMIT 1条、POST 187条，所有188条外参的平移及四元数误差均为0，状态writer关闭无丢失。
+- POST→发布→ingress均187；10个关键帧→backend→保存Bundle均10；received=processed=10，pending=0，active=none；五个进程正常退出0。
+- 实际原始录包3990 IMU与callback整数时间戳及重复计数完全一致，200点云，无录包缓存丢失告警；无压缩，发生SQLite分段。
+- 此短回归没有真实静态TF发布者，实际只出现五话题；没有伪造/tf_static，不能宣称六话题完整。
+- 该回归直接测试离线接线、录包、参数、状态、保存；没有启动live record_manager和现场host-clock门，save的capture_degraded原因明确保留。
+  这些现场检查在正式入口仍严格执行，不能拿离线结果替代现场ready。
+- 尚未验证新固定R/T的物理精度、长距离地图收益、整场实时性能、Localization/Nav2。
+
+坐标核对
+归档驱动 frame_normalization 对点云/角速度/加速度各旋转一次，只有旋转，无平移；SDK transform_flag=false，x/y/z=0。
+aligned表示轴向归一化，不能据此认为LiDAR与IMU原点重合。
+FAST-LIO：p_camera_init = R_camera_init_I*(R_I_L*p_L+T_I_L)+p_camera_init_I。
+本次T按照用户指定值解释为aligned IMU坐标中的LiDAR原点；不反号、不额外旋转，不复制驱动归一化矩阵。
+没有发现归档中已经应用这组非零平移的证据。该数值原始测量坐标/精度及当前远端是否仍与归档完全一致待现场核实。
+body→base_link安装变换是另一条关系，本次不拿它替代LiDAR—IMU外参。
+
+会话与软件身份
+已经创建但尚未启动的全新现场会话：
+/home/bh/A2W_FastLio2_controlled/captures/field_fixed_sessions/fixed_short_20261023_001
+该会话尚未绑定网络、尚未录包。以下终端1只对其绑定一次，不能重复绑定或重新使用已启动会话。
+独立前端：
+/home/bh/A2W_FastLio2_controlled/captures/field_fixed_20261023_prepare_001/build_003/fastlio_mapping
+同目录mapping_ingress_node、mapping_backend_node与.controlled_mapping/backend_install的已核验运行库配套。
+配置模板：experiments/field_fixed_20261023/fixed_extrinsic.yaml。
+每个会话冻结frontend.yaml和授权SHA，actual_frontend.yaml通过真实参数服务获取，actual_input_qos.json是实际DDS端点QoS。
+启动保存startup_summary.json、live_release.json、runtime_libraries.json；不根据节点名或固定sleep认定链路已通。
+现场顺序：录包+probe先运行，backend/ingress/observer先就绪；前端先创建输出发布者，实际端点匹配并获授权release后才创建输入订阅。
+因此没有“暂停实时雷达”的假握手，也不需要启动期无限输入缓冲。
+/Odometry要求ingress+observer+rosbag2_recorder共3个真实匹配端点；body cloud与两条KF输出各要求2个。
+不要给这些受控输出临时添加其他订阅端；断开/多余端点会明确拒绝继续，而不会静默丢初始更新。
+
+终端一：环境、会话绑定和最小录包
+接好机器人有线网络后执行（&&保证上一步失败就不会继续）：
+
+cd /home/bh/A2W_FastLio2_controlled
+export SESSION=/home/bh/A2W_FastLio2_controlled/captures/field_fixed_sessions/fixed_short_20261023_001
+source experiments/field_fixed_20261023/env.sh && \
+./experiments/field_fixed_20261023/capture.sh bind-network "$SESSION" && \
+source "$SESSION/session.env" && \
+./experiments/field_fixed_20261023/capture.sh check "$SESSION" && \
+./experiments/field_fixed_20261023/capture.sh record "$SESSION"
+
+record是前台长任务，保持终端开启。必须看到RAW_RECORDING_OBSERVED；它表示独占录包器端点和两个原始话题已观察到，不等于无丢包或INIT通过。
+固定实际参数：128MiB=134217728 bytes、无压缩、SQLite resilient WAL、512MiB或300秒分段；双缓冲可能使用两倍缓存。
+只请求六个话题：/lidar_points /lidar_imu /Odometry /tf /tf_static /mapping/registration_status。
+record_settings.json记录实际命令；缓存容量本身不是无丢包证据。
+不要在建图未保存时直接关终端一。录包告警Cache buffers lost messages或Total lost>0会标记降级。
+
+终端二：输入核对、固定外参建图、真实ready
+保持静止，在新终端执行：
+
+cd /home/bh/A2W_FastLio2_controlled
+source captures/field_fixed_sessions/fixed_short_20261023_001/session.env && \
+./experiments/field_fixed_20261023/capture.sh inputs "$SESSION" && \
+./experiments/field_fixed_20261023/capture.sh start "$SESSION" && \
+./experiments/field_fixed_20261023/capture.sh params "$SESSION" && \
+./experiments/field_fixed_20261023/capture.sh ready "$SESSION" --timeout 120
+
+inputs必须valid=true，检查真实frame、字段、发布者QoS、持续输入、当前host/sensor差不超过2秒、同会话录包PID与端点及实际128MiB设置。
+check只验软件/冻结契约，inputs和start才检查当下真实数据；SSH成功不能代替。
+若时钟差超限，停止本会话采图后按已确认流程校时，再新建会话；不能把主机时差填入LiDAR—IMU offset。
+start会打印前端二进制、会话配置、完整R/T及false；完整版本和动态库身份另存JSON。
+params来自直接参数服务（不使用旧ROS CLI daemon缓存），同时检查实际KEEP_LAST100/BEST_EFFORT。
+ready必须ready=true、真实INIT_COMMIT及时间一致性通过、至少一条真实POST、fixed_state.valid=true；backend必须有新鲜state=receiving状态且processed>0，不能仅前端ready而后端未处理关键帧。
+C++在初始化完成及每次激光更新后检查实际R/T；发生变化会报错退出，不会把数值强行夹回目标。
+ready失败：继续静止，读init_quality.csv、raw_input_report.json、logs/frontend.log；不放宽20ms门，不将Odometry或started当作ready。
+只有ready通过后才由用户现场手控小范围短闭环；本入口不发布运动命令。
+首次短闭环结束后先保存核查，再为全厂另建新会话；本次准备不认证全厂地图精度。
+
+终端三：仅显示真正提交的回环
+
+cd /home/bh/A2W_FastLio2_controlled
+source captures/field_fixed_sessions/fixed_short_20261023_001/session.env && \
+./experiments/field_fixed_20261023/capture.sh loops "$SESSION"
+
+只读取本会话backend.log中的[LoopCommitted]审计行，含source_id/target_id/fitness/overlap等。
+没有输出表示尚未看到真实提交；候选、accepted或“验证成功、待优化”不会冒充已提交。
+它只证明软件约束提交，不证明物理回环正确。请保留完整backend.log供几何复核。
+
+结束：先停止手控行走，再保存、排空、正常退出
+仍用终端二、保持静止：
+
+./experiments/field_fixed_20261023/capture.sh save "$SESSION" --timeout 600
+
+必须成功返回success=true，且drain.received==drain.processed、pending==0、active="none"，Bundle manifest验证通过。
+保存服务先冻结后端接收截止，再排空并保存；当前回环随KF同步执行，此时无在途关键帧/回环任务。
+若超时，不重复保存，不强杀；后端可能仍在排空，继续检查logs/backend.log。
+保存成功后再执行：
+
+./experiments/field_fixed_20261023/capture.sh stop "$SESSION"
+
+终端一应正常返回。终端三按Ctrl+C停止监视，然后终端二执行：
+
+./experiments/field_fixed_20261023/capture.sh verify "$SESSION"
+
+verify必须等录包退出/metadata写入后再执行。检查field_verification.json：
+- capture_degraded=false；record_closed.exit_code=0；没有缓存丢失告警；Bag覆盖包含前端启动前原始数据；
+- runtime.valid=true且attempted=enqueued=written=CSV行数，closed/flush_ok=true，dropped/write_errors=0；
+- fixed_state.valid=true，所有INIT/POST的R/T正确；
+- imu_callback_vs_bag.valid=true，在callback覆盖的整数传感器时间区间精确按重复次数核对；
+- handoff.valid=true，首POST进入首KF，保存截止范围无静默丢失；截止之后仍在继续的传感器/前端尾部单独列出，不算入已保存地图。
+- missing_topics必须逐项看；没有/tf_static发布者时不伪造TF，不得称六话题完整；有发布者却未录到则失败。
+任何失败保留Bag/日志/Bundle为降级证据，不把退出0或Bundle存在当作精度/输入连续性通过。
+
+输出位置（均在$SESSION下）
+原始录包：bag/（*.db3分段和metadata.yaml）；实际录包参数：record_settings.json。
+原生Map Bundle：bundles/map_bundle/；原生总点云：bundles/map_bundle/global_map.pcd。
+关键帧：bundles/map_bundle/keyframes/index.csv和keyframes/clouds/；优化轨迹：bundles/map_bundle/optimized_poses.csv。
+全程raw前端轨迹/姿态/g/ba/bg/R/T：runtime_state.csv；初始化质量：init_quality.csv；整数IMU输入：input.csv。
+有效参数：snapshots/actual_frontend.yaml、actual_backend.yaml、actual_ingress.yaml。
+固定参数检查：fixed_actual_parameters.json、field_ready.json、field_verification.json。
+交接账本：frontend_handoff.csv、ingress_handoff.csv、backend_handoff.csv及各自关闭状态JSON。
+身份/运行库：identity.json、startup_summary.json、runtime_libraries.json。
+日志：logs/frontend.log、ingress.log、backend.log、recorder.log、field_observer.log及ros_logs/。
+
+中止与回退
+启动或INIT失败时不行走；若没有可保存的INIT，明确放弃该图后：
+./experiments/field_fixed_20261023/capture.sh stop "$SESSION" --discard-unsaved
+仍保留原始Bag和失败日志，不执行rm、pkill或SIGKILL。若某进程未退出，保留证据并定位，不能直接关机。
+回退就是不用这套独立入口；生产默认未被修改。不恢复到漏收POST0..47的旧入口。
+
+短闭环确认正常后：全厂采集必须另建新会话
+先完成短会话保存/stop/verify，不复用其Bag或Bundle。
+新会话示例（新的终端一，name含时间防止覆盖）：
+
+cd /home/bh/A2W_FastLio2_controlled
+source experiments/field_fixed_20261023/env.sh
+NAME="fixed_factory_$(date +%Y%m%d_%H%M%S)"
+# env.sh若失败立即停止；不要继续init。
+./experiments/field_fixed_20261023/capture.sh init "$NAME" \
+  --authorize-user-fixed-extrinsic \
+  --authorization-note '用户指定固定R=I,T=[-0.00862,0.00914,0.03916],false；未认证物理精度；短闭环现场检查通过后新会话手控全厂'
+source captures/field_fixed_20261023_prepare_001/current_session.env
+./experiments/field_fixed_20261023/capture.sh check "$SESSION" && \
+./experiments/field_fixed_20261023/capture.sh record "$SESSION"
+
+另外两个终端改为source captures/field_fixed_20261023_prepare_001/current_session.env，再按上述inputs/start/params/ready/loops/save/stop/verify顺序。
+新会话默认不自动运行。true/false后续离线对照必须两组使用相同的新非零T和R，不能与旧T=0/true混比。
+
+回归与证据位置
+captures/field_fixed_20261023_prepare_001/tests/offline_smoke_008/result.json
+captures/field_fixed_20261023_prepare_001/tests/smoke_008_input_reconciliation.json
+captures/field_fixed_20261023_prepare_001/audit/coordinate_audit.json
+captures/field_fixed_20261023_prepare_001/audit/local_network_readonly.json
+原始失败版本build_001/002及smoke_001..005保留，不是现场所选版本。
+独立配置和入口只作用于本次试采，不代表固定外参比online=true更准。主地图Z/角度问题没有在本次准备中宣称解决。

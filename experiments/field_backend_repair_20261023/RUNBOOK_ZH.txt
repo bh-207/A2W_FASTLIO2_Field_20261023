@@ -1,0 +1,126 @@
+828KF 后端保护与退出修复：离线复现及下次现场操作
+
+当前定位
+本入口使用 source/frontend 和 source/src 的新构建，绝不调用主 install 或历史 build_003。
+工程修复版与几何实验版分开：现场 init 默认关闭 causal_geometry_guard；P/R/J、增强回环和新增重力约束关闭。
+候选地面改善不等于整图通过。候选 wall125 P95 未通过保护门，本轮不推荐切换生产或导航地图。
+固定外参来自用户指定配置（不是认证标定）：false，T=[-0.00862,0.00914,0.03916]m，R=I，offset=0。
+保持 Depth100/BEST_EFFORT、v4 初始化与质量门、逐点时间及整数 IMU 时间。
+本轮只在本机离线验证；以下现场网络/时钟/真实驱动准入仍须现场检查，不能以离线结果代替。
+历史 source/experiments/field_fixed_20261023/RUNBOOK_ZH.txt 仅为旧档案，不是本次操作入口。
+
+一、构建与离线复现（不接机器人）
+一键冻结图复现：
+python3 /home/bh/A2W_FastLio2_controlled/experiments/field_backend_repair_20261023/reproduce.py my_fresh_repro_001
+默认从新源码构建，执行无保护8组合、guard8组合、Bundle/PCD与8区评估。FAIL保留输出并返回2；不是异常结束。
+已实际完成 reproductions/final_entry_001；--reuse-build会先核对源与二进制身份；--commands-only只显示命令。
+不要为了拿exit0放宽几何门。原速整程另加 --full-replay-id 020；需要独立空闲空间，且禁止同时核算大Bag。
+
+cd /home/bh/A2W_FastLio2_controlled
+python3 experiments/field_backend_repair_20261023/build.py
+
+构建默认输出 captures/field_backend_repair_20261023_001/build；可用 --build /绝对/全新目录 重建。
+依赖使用本机 .deps/install 的 GTSAM4.1 及 /opt/ros/humble，应用代码与第三方应用库从源码编译。
+第三方 TEASER/PMC 为原固定版本只读来源；不使用历史应用 .o、link.txt 或主 install。
+部分构建必须覆盖变更依赖；.cc、ROS .msg/.srv、CMake等全部有界源身份均被检查，首次或不确定时执行全包默认构建。
+默认不开 ROS 或驱动。新产物身份为 build/build_manifest.json，不能沿用旧 SHA。
+本机 colcon 的 PTY 子进程路径曾发生等待；本入口直接调用各包原 CMakeLists 和 ament install。
+
+冻结图八组合（每次给全新输出目录；固定测量避免 matcher 波动）：
+bash experiments/field_backend_repair_20261023/run.sh \
+  captures/field_backend_repair_20261023_001/build/backend_install/a2w_fastlio_mapping/lib/a2w_fastlio_mapping/field_frozen_graph \
+  captures/field_fixed_sessions/fixed_short_20261023_001/bundles/map_bundle \
+  captures/field_backend_repair_20261023_001/frozen/operator_repeat_001 \
+  --measurements captures/field_backend_repair_20261023_001/frozen/run1/new_measurements.csv
+
+注意：这些是重新配准的新实验约束；历史精确因子不存在，不能声称复现原现场优化图。
+--guard 可用于实验试优化，默认关闭。guard 日志 UNKNOWN/REJECT 均不入图；独立几何验收仍是必要条件。
+
+全时长原速离线入口（每次改用未存在的 offline_smoke_数字）：
+ROS_DOMAIN_ID=87 ROS_LOCALHOST_ONLY=1 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+A2W_REPLAY_SECONDS=0 A2W_REPLAY_RATE=1 A2W_OFFLINE_GEOMETRY_GUARD=1 \
+bash experiments/field_backend_repair_20261023/run.sh python3 \
+  experiments/field_backend_repair_20261023/source/experiments/field_fixed_20261023/offline_smoke.py offline_smoke_020
+
+该测试只回放本次现场 Bag（830.667s；828KF Bundle 为其794.8s保存前缀），TCP peers 全部为127.0.0.1。
+它保留原始 epoch，不运行现场主机时差准入，不测试真实网络和前台 record_manager；这些项标记 NOT_RUN。
+测试默认录六话题、无压缩、128MiB、分段；完成完整前端→关键帧→后端→保存→排空→真实退出。
+不能将测试保存结果中 live capture_degraded 标签抹去；按离线专用账本单独判定。
+本次已运行010/013两次全长（均完整性FAIL）、011原速120秒（PASS_SCOPED_OFFLINE）、014最终补丁原速20秒（PASS_SCOPED_OFFLINE）；均禁止覆盖。
+最终补丁并未完成另一轮全长验收，不能以014替代整程。当前仅剩约5.4GiB，下一轮完整录包须先提供至少35GiB独立空间；本入口不删除旧数据。
+
+二、下次现场终端一：环境、输入与录包
+先接机器人有线网络，确保机器人静止。不得启动第二套雷达驱动或移动机器人。
+本次没有修改164；真实 ROS_DOMAIN_ID=0。
+校时只能在所有采图进程停止时做；主机时差不能填写成 LiDAR—IMU offset。
+下述 env 只读选择本机有线地址并生成会话 DDS 文件，不改网卡、路由、时间或驱动。
+
+cd /home/bh/A2W_FastLio2_controlled
+source experiments/field_backend_repair_20261023/source/experiments/field_fixed_20261023/env.sh
+bash experiments/field_backend_repair_20261023/source/experiments/field_fixed_20261023/capture.sh \
+  init next_fixed_short_001 --authorize-user-fixed-extrinsic \
+  --authorization-note '用户指定固定R=I/T=[-.00862,.00914,.03916]/false；仅静止检查及手控短闭环；物理精度未认证'
+source captures/field_backend_repair_20261023_001/current_session.env
+bash experiments/field_backend_repair_20261023/source/experiments/field_fixed_20261023/capture.sh check "$SESSION"
+bash experiments/field_backend_repair_20261023/source/experiments/field_fixed_20261023/capture.sh record "$SESSION"
+
+会话名必须全新。成功迹象：RAW_RECORDING_OBSERVED，真实 raw 两话题/端点与同会话 recorder 绑定。
+保持终端一运行。录包必须先于前端初始化，缓存128MiB不能当作无丢失证明。
+只录 /lidar_points /lidar_imu /Odometry /tf /tf_static /mapping/registration_status。
+出现时间、frame、单位、QoS、不连续、录包报警时不要启动行走，不绕过门禁。
+
+三、终端二：可靠工程入口与真实 ready
+cd /home/bh/A2W_FastLio2_controlled
+source captures/field_backend_repair_20261023_001/current_session.env
+bash experiments/field_backend_repair_20261023/source/experiments/field_fixed_20261023/capture.sh inputs "$SESSION"
+bash experiments/field_backend_repair_20261023/source/experiments/field_fixed_20261023/capture.sh start "$SESSION"
+bash experiments/field_backend_repair_20261023/source/experiments/field_fixed_20261023/capture.sh params "$SESSION"
+bash experiments/field_backend_repair_20261023/source/experiments/field_fixed_20261023/capture.sh ready "$SESSION" --timeout 120
+
+核对：实际 executable/DSO SHA、新配置绝对路径、false、完整R/T、IMU实际QoS100/BEST_EFFORT。
+端点握手核对必要身份及兼容性；允许合法调试订阅，节点名称出现或固定sleep不算就绪。
+必须有真实 INIT_COMMIT、固定外参状态不变和 backend receiving/processed，才允许用户手控小范围闭环。
+当前整程完整性仍FAIL，下面仅是后续现场回归命令，不构成部署或全厂试采已通过的结论。
+该脚本不发布运动命令。先短闭环评审，正常后另建会话采全厂，不把短会话继续扩展成正式地图。
+现场默认 guard=false；本轮几何候选仍FAIL，不能通过临时改YAML将其投入生产。
+
+四、终端三：只看已提交回环
+cd /home/bh/A2W_FastLio2_controlled
+source captures/field_backend_repair_20261023_001/current_session.env
+bash experiments/field_backend_repair_20261023/source/experiments/field_fixed_20261023/capture.sh loops "$SESSION"
+只输出实际 [LoopCommitted]；配准accepted/“回环验证成功”不等于图已提交。
+
+五、结束：先停止手控行走，再保存、排空、退出、复核
+在终端二运行：
+bash experiments/field_backend_repair_20261023/source/experiments/field_fixed_20261023/capture.sh save "$SESSION" --timeout 600
+bash experiments/field_backend_repair_20261023/source/experiments/field_fixed_20261023/capture.sh stop "$SESSION"
+bash experiments/field_backend_repair_20261023/source/experiments/field_fixed_20261023/capture.sh verify "$SESSION"
+
+save 成功必须有服务success、Bundle校验、received==processed、pending=0、active=none/state=saved。
+stop 先停前端、再ingress/backend/observer、最后recorder，实际wait结果与日志closed/flush都要通过。
+不以PID消失当正常退出；非零/缺少状态/flush失败保留失败；不会自动SIGKILL。
+终端一应正常结束。检查 stop.json.success、frontend_exit_status.json、record_closed.json 与 field_verification.json。
+verify 单独检查IMU双向差异及初始化/逐POST/交接记录，exit0或没有cache-loss不等于数据完整。
+未保存不能正常stop；确需放弃时显式 stop --discard-unsaved，原数据仍保留。
+
+实际目录
+新现场会话：captures/field_backend_repair_20261023_001/field_sessions/<新会话名>/
+PCD：该会话/bundles/map_bundle/global_map.pcd
+完整Bundle：该会话/bundles/map_bundle/
+原始Bag：该会话/bag/
+有效配置：该会话/snapshots/actual_*.yaml 与 frontend.yaml/backend_runtime.yaml
+状态与日志：runtime_state.csv、input.csv、*_handoff.csv、exact_factor_ledger.csv及.registration.jsonl、logs/
+退出证据：process_exits/*.json、frontend_exit_status.json、stop.json、record_closed.json
+
+本次候选交付（保留失败，不切换生产）
+captures/field_backend_repair_20261023_001/frozen/bundles/guarded_v2_candidate_run1/global_map.pcd
+完整Bundle为同级目录；其原828帧body云/原始位姿保持不变。
+诊断mask5不是按ID剔边的上线配置，不允许将诊断删边列表用作回环黑名单。
+
+六、独立正式门（回放关闭后运行，不能与实时测试并行扫大Bag）
+python3 experiments/field_backend_repair_20261023/accept_run.py \
+  captures/field_backend_repair_20261023_001/tests/offline_smoke_020
+正式门比较完整发布序列，包括首尾、重复重数；同时核对全部POST→publish→ingress，包括最后保存KF之后的尾段。
+首次输出ACCEPTANCE.json；需要保留旧版重审时用 --output /绝对/新文件.json，绝不覆盖。
+status为PASS_SCOPED_OFFLINE只认证离线所列范围，不认证硬件、绝对几何、现场record_manager或导航。
+当前原始828KF、失败v1/v2候选、完整013的844KF均独立保留，不能混称同一输入完全复现。

@@ -1,3 +1,5 @@
+> **最新独立修复入口：** [828KF后端与退出修复](experiments/field_backend_repair_20261023/README.md)。工程短程回归通过；候选整体几何及全长原速完整性仍FAIL，未切生产。
+
 > **2026-10-23源码快照：** 请先阅读 [导出内容、已知问题及构建边界](EXPORT_NOTES_ZH.md)。现场入口的停机异常与后端接缝退步尚未修复；本仓库不是导航验收通过版本。
 
 # A2W Fast-LIO2 Mapping, Localization and Navigation

@@ -1,0 +1,8 @@
+实际生效源码只取 source/frontend、source/src；build.py显式逐包配置。共享startup_trace.hpp在frontend中，由mapping CMake显式include。
+source/scripts与source/experiments/field_fixed_20261023是本轮运行入口，完整动态身份保存于每个session/identity.json。
+根目录RUNBOOK_ZH.txt是唯一操作文档；source内复制的旧field_source_snapshot及历史experiments文档不参与本次编译，不可作为入口。
+CODE_REPRODUCE.tar.gz只封装实际构建/采集所需树与本轮工具，解包在另一个项目副本根目录；不要覆盖生产checkout。
+依赖Ubuntu22.04/ROS2Humble、系统PCL/Eigen等与固定GTSAM4.1.1（.deps/install）。第三方TEASER/PMC随包展开，未改厂家驱动。
+数据依赖：保留原828KF Bundle及现场Bag、原几何协议路径；数据不装入源码包。已有冻结评估缓存及所有失败证据在captures目录，仍保留。
+建议先python3 experiments/field_backend_repair_20261023/build.py；再reproduce.py全新名字。几何失败按约定exit2，不是成功版本。
+本轮不上传Bag/地图/日志或现场接口档案到GitHub；当前包仅为本机可复现交付。
