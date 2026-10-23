@@ -1,0 +1,124 @@
+建图首次重访回环诊断、实验实现及离线验收
+日期：2026-10-20
+
+结论
+已实际完成代码修改、1490帧基线/增强完整顺序回放和独立几何检查。
+增强策略改善了起点路线附近的首次检出，但没有通过生产验收：部分非地面
+接缝恶化，处理预算也不足。因此保留为默认关闭的独立实验，不切换生产配置。
+不能把“2条变成38条入图约束”解释为可靠性或地图精度已提高。
+
+一、原有触发少的主要证据
+输入：maps/factory_map_1016；1490个关键帧，UUID
+18df049b-68ba-4512-86e8-7d2217f0d907。
+原在线日志：log/fast_lio_runtime/mapping_backend_node_23611_1792154079255.log。
+1433/1490帧在配准前全部被 candidate_separation_below_limit 拒绝，
+共7157条候选事件；实际只有1193→3、1456→657进入配准并入图。
+该检查把全局SC前两名分数差小于0.05直接视为歧义；相同地点的相邻历史帧
+也会互相构成“第二名”，尚未几何验证就整组拒绝。
+首次重访代理窗口624..646，全局Top5没有初始0..30帧候选；例如630→21
+排名168，635→18排名177。初始区域独立Top5补充，在此23帧中覆盖18帧
+原始里程计5米邻近历史候选。此为候选覆盖代理，不是独立真值召回率。
+关键帧规则1米/10度/2秒，本批关键帧稀疏不是上述拒绝的主要原因。
+
+二、实现及不变项
+新增可选revisit分支：全局Top5 + 初始0..30帧Top5，按ID去重；起点补查不
+依赖当前漂移里程计。保留SC最大距离0.2及近30帧排除。
+对候选执行原Quatro→Nano-GICP→Validator，再按实际配准出的位姿合并同解、
+比较不同解；不得仅按邻近历史帧归组就跳过竞争解验证。
+新增不同几何解fitness差0.05米、同解0.5米/0.1弧度、2个新帧一致性确认。
+原0.05 SC分差是无量纲；新增几何fitness差不是它的直接等价替换。
+盲目发现同历史组每2新帧重试、每阶段最多3次、30帧后重新开放；一旦得到
+有效假设，同源帧必须补验被重试调度延后的竞争候选，不能带未知竞争解入图。
+当前侧Local Map每帧构建一次；不重写配准器，不增加并行候选。
+原fitness0.25、overlap0.35、对应点30、5米/1弧度保护保持不变。
+生产FAST-LIO、Quatro、Nano-GICP、Local Map参数、iSAM2参数、Nav2未修改。
+修复accepted/cooldown语义：只有图更新提交成功才报告最终接受。
+增加SC分数/朝向、起点候选标识、确认帧数、拒绝层级及各阶段耗时日志；
+未来保存的配置快照也记录loop_pipeline参数。原Bundle格式不变。
+
+三、完整回放实际结果
+两组均从原始FAST-LIO里程计及关键帧顺序重建；不拿已优化位姿冒充原始位姿。
+使用同一SC距离/朝向缓存，严格只查当时已存在的历史描述子；配准、验证、
+iSAM2全部真实执行。缓存身份、源码身份、有效参数和实际命令保留在各run目录。
+原始输入没有逐点传感器时间，实验不是重新运行原始前端去畸变。
+
+指标                              基线                     增强v2
+处理关键帧                         1490                     1490
+实际配准候选                       2                        3860
+加入图的约束                       2                        38
+617..646窗口几何尝试/入图           0/0                      115/1
+该窗口首次入图                     无                       632→18
+最终因子/节点                      1492/1490                1528/1490
+
+增强首次任意地点入图338→304；首次初始区域候选入图613→28。
+632→18比基线首次1193→3提前801.900秒（传感器时序，不含后端积压等待）。
+该条fitness0.171313，overlap0.417352，对应3858，2帧确认；前验修正0.154904米，
+旋转1.230753度。它不等于机器人与精确第0帧完全重合。
+首次候选恰好为第0帧是1187→0，仅比基线首次提前8.700秒。
+3860次配准中355个候选通过全部原几何/位姿门限；38条最终入图。
+所有38条均检查了两帧确认及5米/1弧度，但没有独立真值证明它们全部正确。
+保存前额外图更新已完成，revision1490→1491，因子数不变。
+
+四、性能：当前实验不能直接在线开启
+完整增强回放：Quatro P50/P95=369.651/527.675毫秒，Nano-GICP=138.009/273.849
+毫秒；逐帧process P50/P95/max=1092.695/5028.108/7842.753毫秒。
+SC缓存全序列吞吐0.642帧/秒，低于本批输入0.697帧/秒。
+仅按实测process与原到达时间做单worker无限FIFO下界模拟，最大pending314帧，
+最大完成延迟580.910秒；不包含真实SC、ROS、预览及额外IO，不是真实丢帧统计。
+另实际关闭SC缓存重跑617..646窗口：SC P50/P95基线32.039/33.358毫秒、
+增强36.412/55.055毫秒；增强查询激活帧P50/P95/max=4.781/6.383/6.572秒。
+该窗口之前禁止配准，图历史不同，仅作真实检索耗时抽样；不能用窗口3条
+入图替代完整回放同窗口的1条。当前主要新增计算在多候选Quatro/精配准。
+两组OMP_NUM_THREADS=4、OPENBLAS_NUM_THREADS=1；PCL部分预处理默认线程
+按omp_get_num_procs取本机20核，不应声称所有模块都严格只用4线程。
+
+五、几何验收：改善和退步并存
+使用固定1026个地面重访对、59个非地面帧对及固定匹配点，不靠重选点美化结果。
+局部留出地面高度差P95：14.39→5.25厘米；外部留出：9.75→6.93厘米。
+但局部225对中45对高度、98对法向恶化；1170↔1214留出高度差1.57→5.72厘米。
+59对非地面中49对至少一个指标恶化；582↔1322固定匹配P95由58.33→90.03厘米，
+70↔1298固定匹配覆盖率91.64%→58.62%。不能宣称正常区域无损。
+原始里程计相邻因子最差平移残差0.018→9.00毫米；A参考区最大位姿移动32.06厘米。
+增强自身回环残差最大1.25厘米/0.357度，只说明因子拟合，不证明物理正确。
+地图原大尺度高度弯曲仍存在；没有地坪/重力/绝对位姿真值，不能当作现场坡度，
+也不能据此判断IMU故障、倾斜根因已查清、误回环为零或绝对闭合精度已通过。
+
+六、文件和验证
+产品：src/a2w_fastlio_mapping/include/a2w_fastlio_mapping/loop_pipeline.hpp；
+src/loop_pipeline.cpp；新增src/loop_revisit.cpp；src/mapping_backend_node.cpp；
+config/loop_revisit_experiment.yaml；CMakeLists.txt（均在同一Mapping包内）。
+测试：test/test_loop_pipeline.cpp；test/loop_recall_replay.cpp；
+test/test_loop_recall_replay.cpp；scripts/diagnostics/loop_recall_geometry.py及对应测试。
+Release隔离构建及安装通过；Mapping最终13/13测试目标通过
+（10个gtest目标共88例，3个ROS launch目标），几何脚本12例通过。
+最初ROS测试因沙箱禁止网卡枚举失败，保留失败日志；之后仅在lo/domain171
+隔离环境重跑全部13目标通过。没有连接机器人或真实运动。
+原Bundle1498文件manifest校验通过；未覆盖地图、生产配置或主install。
+
+复现实验（在已构建依赖的工作区根目录）
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+cmake -S src/a2w_fastlio_mapping -B artifacts/loop_recall_rebuild/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_INSTALL_PREFIX="$PWD/artifacts/loop_recall_rebuild/install"
+cmake --build artifacts/loop_recall_rebuild/build -j2
+OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=1 artifacts/loop_recall_rebuild/build/loop_recall_replay maps/factory_map_1016 artifacts/loop_recall_rebuild/baseline legacy 0 1489
+OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=1 artifacts/loop_recall_rebuild/build/loop_recall_replay maps/factory_map_1016 artifacts/loop_recall_rebuild/enhanced enhanced 0 1489
+以上默认真实SC，无缓存；两组都会拒绝复用已存在的输出目录，避免覆盖。
+完整真实SC全序列尚未执行，本轮全序列为核验身份的缓存检索加真实几何/图优化。
+
+实验记录：artifacts/loop_recall_20261020/
+baseline_v2_final/、enhanced_v2_full/：事件、查询、逐帧统计、实际回环测量、
+逐次提交位姿、保存前后位姿及身份/命令/配置。
+replay_statistics_v2/FINAL_STATISTICS_zh.txt：完整计数、38条明细及积压模拟。
+replay_statistics_v2/live_sc_window.txt：真实SC窗口独立结果。
+geometry_v2_final/：逐对接缝/因子/法向/区域回归及同视角对照图。
+enhanced_full/：第一版被竞争候选冷却挡住确认的失败全序列结果，未删除。
+
+七、后续限制
+重复结构下两帧一致仍不代表真实闭环；当前几何约束对非地面结构的保护不足，
+需先定位具体回环造成的接缝退步，不能通过继续放宽门限追求数量。
+需要减少候选无效重复计算并重新测完整吞吐；不能只以单次GICP速度替代验收。
+有限重试仍有多个当前组共享旧retry anchor的调度边界，可能延后某组召回；
+有有效假设时强制补验竞争组的安全逻辑不受影响。
+不同朝向有SC yaw检索，但现有Quatro忽略initial guess，不能把body yaw直接
+当作map系修正。缺少独立带真值反向重访集，尚未验收任意朝向/姿态覆盖。
+本轮到此保留实验与证据；不自动开启生产、不发布修复地图、不重新采集。

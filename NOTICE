@@ -1,0 +1,5 @@
+A2W Fast-LIO2 project-developed ROS 2 wrappers and tools use the package-declared
+Apache-2.0 license. Third-party components and supplied model resources retain
+their own notices and applicable terms; the root license does not relicense them.
+See third_party/THIRD_PARTY_NOTICES.md, each dependency's LICENSE/UPSTREAM.md,
+and the individual package manifests.

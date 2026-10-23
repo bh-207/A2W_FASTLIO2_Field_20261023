@@ -1,0 +1,348 @@
+固定候选 / 固定输入 / 固定图快照子图实验 v4 (2026-10-21)
+
+状态：第一轮32次、同坐标控制8次及leave-scan-out4次真实配准均已完成(exit0)。
+本文不宣布任何生产方案通过。
+
+范围与冻结口径
+  只读 maps/factory_map_1016；不修改 LocalMapBuilder、loop pipeline、采样策略、
+  配准/验收阈值或真实机器人。候选固定为 614->29、638->15、1292->61、1321->582。
+  这四对是既有 v3 提交的诊断代表，不是上线候选 oracle；真实地点标签全部 unknown，
+  没有独立测量、人工核实或定位真值，不根据 NN/fitness 自动生成真/假闭环标签。
+
+  图输入为 scheduled_live_full_paced/loop_constraints.csv 的已测量固定因子。
+  工具从原始 odom 顺序重放，每帧 addKeyFrame 和 update。每个 query 的快照仅含
+  严格更早帧已经提交的因子；当前帧按上一帧 committed optimized pose 与同源
+  raw-odom 增量预测。被测试当前因子及任何未来因子绝不参与当前子图构造。
+  这仍是固定历史因子条件下的局部实验，不是重新选择全部历史约束的在线回放。
+
+子图变体
+  optimized_map_window5：实际生产 LocalMapBuilder 的 optimized map 坐标，±5窗口。
+  raw_anchor_window5：同一组 scan，inverse(raw_anchor)*raw_neighbor 局部锚定。
+  raw_anchor_window2：局部锚定±2短窗口。
+  single_frame：仅当前/历史 anchor 原始 body cloud。
+  controls_holdout 模式另跑 optimized_anchor_window5：与raw-anchor相同anchor坐标，
+  但内部使用 inverse(optimized_anchor)*optimized_neighbor。用于隔离坐标/voxel
+  网格变化与raw-vs-optimized内部姿态变化。
+  optimized_map_leave_centers_out：生产±5 map子图，source完整排除current scan，
+  target完整排除candidate scan，full路径求解；两中心完整cloud仍全部参与评价。
+  这仅是未参与本次求解的scan内部holdout，邻scan/odom/历史图因子仍相关，绝不是
+  物理独立真值或独立测试集。图里既有因子可能早已使用同一区域的信息。
+  所有 source 窗口均截至 current，不能读未来 cloud；历史 target 的 after 邻帧必须
+  已在 current 前存在。子图成员、时间间隔、共享原始 scan ID 完整记录；该ID交集
+  实际为Bundle keyframe/body-cloud ID，缺失激光packet级溯源，不能证明packet独立。
+  注意：map->raw-anchor 同时改变内部姿态、注册坐标和体素网格，不可直接宣称是
+  “raw odom 消除了图形变”。若有改善，推荐前须有同坐标 optimized-anchor 控制。
+
+采样与容量
+  使用原 LocalMapBuilder，不复制/修改 voxel 算法。记录 merged、voxel_before_cap、
+  after_cap 的点数与 XYZ 范围。pre-cap 用 SIZE_MAX 上限的原 builder 获得，最终点集
+  用原200000上限builder获得，逐点检查最终是pre-cap序列的相同prefix。
+  height仅为 anchor body-relative z proxy 和原 local-ground plane proxy，
+  保留原坡度；body.z/map.z 不称物理高度，不推断真实 gravity。
+
+  已核对最终 v3 paced events.csv 全5017行：source_points 最大16490，target_points
+  最大24068，两字段>=200000均0。由于截断必返回恰好200000，可排除这些已记录实际
+  配准输入上的200k截断。此证据不排除合并、体素化、内部非刚体变形或配准错误。
+
+配准与恢复
+  每个变体独立 full Quatro+Nano-GICP 与 fine-only。full 不传原始 SC yaw 到 map。
+  fine-only 初值为 At * inverse(P_history)*P_current * inverse(As)。
+  As/At 为各 anchor body->solver 坐标变换。恢复：
+    T_body_target_source = inverse(At) * T_solver * As
+    corrected_current_map = P_history * T_body_target_source
+    graph_relative_current_inverse_history = inverse(T_body_target_source)
+  fine 证据保留原fitness/overlap/correspondences，在恢复后的 map body pose 再执行
+  原5m/1rad pose guard。不调任何阈值。probe不评估竞争候选和跨帧确认，valid字段
+  只代表单对几何和pose guard，不代表可入图或已通过完整安全pipeline。
+
+固定结构评价
+  每对评价点集始终为两侧完整原始 anchor body clouds，不随solver窗口或高度改变。
+  双向全点 NN覆盖(.5m)、p50/p95；原始prior冻结对应的覆盖/距离；固定PCA法向上的
+  点到面/法向角；分层低<=.25m、中(.25,3]m、高>3m来自原local-ground proxy。
+  法向 k12、邻域半径<=.6m、lambda1>1e-5、lambda0/lambda1<.3，配准前一次冻结。
+  点到面/法向只在明确记录的固定可信法向子集上统计；完整距离分母从不删除。
+  另列prior-NN<=2m的冻结共同支持proxy，不能称真实可见性或独立真值；prior选择
+  有偏，必须与全点一起看。匹配2m bodyXY网格/方位覆盖、target多对一比例、最大
+  multiplicity及集中度用于暴露局部重复结构吸附，不自动等价结构正确性。
+  没有空间留出则不得声称独立holdout；未把后验nearest重选对应称固定对应。
+
+可复现工具
+  src/a2w_fastlio_mapping/test/loop_submap_probe_v4.cpp
+  src/a2w_fastlio_mapping/test/test_loop_submap_probe_v4.cpp
+  链接 common + pose_graph_optimizer + yaml-cpp；PCL由common导出。
+  root统一CMake。CLI：
+    loop_submap_probe_v4 BUNDLE ACTUAL_RUN_DIR GROUND_PROXY_JSON NEW_OUTPUT_DIR [NANO_THREADS=1] [controls_holdout]
+  输出必须全新目录；既有证据不覆盖。注册计时仅真实operator调用；build_wall_ms
+  包含诊断多次builder/统计开销，不能冒充在线LocalMap时延或全序列容量证据。
+
+TDD证据
+  artifacts/loop_v4_20261021/submaps/tdd_red.log：4个行为测试全部真实失败。
+  artifacts/loop_v4_20261021/submaps/tdd_green.log：同4项全部通过。
+  覆盖：source无future窗口；非交换坐标恢复；current^-1*history因子方向；
+  内部rigid inconsistency不被全局gauge平移误触发。
+  holdout_tdd_red.log：新增完整中心scan排除测试真实失败(旧4项仍通过)；
+  holdout_tdd_green.log / controls_holdout_cmake_tests.log：5项全部通过。
+  ctest_probe.log：CTest probe目标通过。未将这些5项局部测试冒充整个项目测试。
+
+第一轮实际结果 (OMP_NUM_THREADS=4 / OPENBLAS_NUM_THREADS=1 / Nano线程1)
+  这里OMP4仅记录环境变量，并不证明总线程<=4：后续发现PMC硬编码12线程，
+  显式num_threads可绕过OMP_NUM_THREADS。除另注OMP_THREAD_LIMIT的实验外，
+  都不能声称总OMP线程上限4；历史v3的资源/时延比较也须保留此口径差异。
+  输出 artifacts/loop_v4_20261021/submaps/fixed_probe_v1/，32次配准，exit0。
+  原始68个PCD、source/binary/config/原始pose/factor/ground-proxy及输出SHA256
+  见同级 fixed_probe_v1_{inputs,clouds,outputs}.sha256；原始数据未改。
+
+  四个pre-query current预测与真实v3 events差异均<4e-15m/<7e-16rad，验证
+  没有借用当前提交或未来优化。生产±5 full得到因子与原v3测量最大差0.177mm/
+  0.0000333rad（线程/浮点），此处没有大幅复现漂移。
+
+  production map ±5 实际 merged -> voxel (=after_cap) 点数：
+    pair        source            target
+    614->29     50910 -> 13929     101931 -> 23631
+    638->15     57397 -> 7778      102698 -> 20280
+    1292->61    47806 -> 12600      89916 -> 19456
+    1321->582   46474 -> 12032      81193 -> 19412
+  全变体pre-cap最大23828，无cap。全部XYZ范围/各阶段height proxy见submap_counts.csv。
+  ±5 map voxel后local-ground>3m proxy占比.623-.747；这是点集/体素描述，不是屋顶因果证明。
+  四对source/target KF-ID交集均0，窗口最近时间间隔745/795/1708/1067秒。
+  ±5 optimized-vs-raw内部锚相对最大变形：前两对~1e-13m；后两对10.84mm/
+  .000290rad及12.42mm/.001483rad。不能把当前恶化直接归因米级内部图扭曲。
+
+  optimized_map_window5 的full vs fine-only wall(ms)：
+    614->29 411.3/129.9；638->15 286.8/89.2；1292->61 346.9/100.8；1321->582 365.5/113.1。
+  四对两路径都通过单对原几何+pose guard；恢复factor最大差.181mm/.0000447rad。
+  四对均接近已存在局部解，不能据此证明fine-only对大初值误差或竞争者安全。
+  本实验不进行竞争豁免，不推荐用fine-only替换整个full安全链。
+
+  raw-anchor±5没有稳定结构优胜：1321->582完整点固定对应p95双向 map .520/.467m
+  vs raw .513/.461m（毫米级），1292->61则 .617/1.313 vs .620/1.313m，前两对近似
+  不变。±2未给一致改善。single full在614因fine不收敛失败；638在full/fine-only
+  都因overlap .321<.35拒绝。故不promote raw/small/single到最终全回放。
+
+  完整点结构呈现明显方向不对称，不能只报solver单向高overlap：
+    map±5 full    完整单帧NN覆盖 source->target / target->source
+    614->29       .632 / .695
+    638->15       .552 / .545
+    1292->61      .938 / .632
+    1321->582     .954 / .961
+  1292->61低/中/高层双向覆盖 .929/.438、.960/.599、.932/.895，solver-submap
+  overlap却.992。1321->582三层 .981/.990、.973/.964、.893/.910。
+  因不同视域/采样/遮挡及重复结构均会产生不对称，这不是假闭环标签。
+  完整分层固定距离/法向/点到面/空间集中/多对一及prior共同支持proxy见
+  full_point_geometry.csv，561行(含header)，不只报告最有利子集。
+
+同坐标控制与未参与求解scan内部holdout结果
+  artifacts/loop_v4_20261021/submaps/fixed_probe_v2_controls_holdout/：12次，exit0。
+  inputs/outputs SHA在同级 fixed_probe_v2_{inputs,outputs}.sha256；仍用前述原68个PCD。
+  全部配准实际operator执行，无距离cache替代registration计时。OMP4 / BLAS1 / Nano1。
+  复现命令在 submaps/reproduce.txt，输出路径必须全新，不能覆盖v1/v2已有证据。
+
+  optimized-anchor与raw-anchor相同坐标/窗口下，恢复T差异分别 .058/1.109/.396/
+  2.363mm，最大rotation .000255rad。固定完整对应p95双向：
+    pair        optimized-anchor        raw-anchor
+    614->29     8.428370 / 7.392947      8.428413 / 7.392946
+    638->15    14.174573 /10.011663     14.174263 /10.012796
+    1292->61     .620769 / 1.312880       .620370 / 1.312640
+    1321->582    .508816 /  .455200       .513178 /  .460636
+  该控制没有支持raw内部pose提供显著质量收益；1321反而optimized-anchor稍好。
+  map坐标版与anchor坐标版的毫米级差异不能错归因raw消除内部图形变。
+
+  leave-centers-out确实排除完整中心scan：
+    614->29   source609..613   target24..28,30..34
+    638->15   source633..637   target10..14,16..20
+    1292->61  source1287..1291 target56..60,62..66
+    1321->582 source1316..1320 target577..581,583..587
+  每一训练ID都<current；中心完整cloud仅用于结构评价，仍全部保留。
+  训练点数分别 source/target 12130/22673、6425/19361、10982/18791、10566/18624。
+  四对full都满足原geometry和pose guard；和中心参与求解full相比恢复T改变
+  12.43/5.51/16.01/4.49mm；没有产生能可靠拒绝所谓恶化代表的失败模式。
+
+  三方完整点NN覆盖(source->target / target->source)：
+    pair        prediction          生产full            留中心scan-out full
+    614->29     .628 / .674         .632 / .695          .632 / .695
+    638->15     .562 / .553         .552 / .545          .553 / .545
+    1292->61    .935 / .634         .938 / .632          .938 / .632
+    1321->582   .958 / .964         .954 / .961          .953 / .961
+  1321->582完整固定对应p95：prediction .453/.416m，生产full .520/.467m，
+  留出 .562/.511m；高层proxy固定p95 .852/.671 -> .968/.810 -> 1.016/.866m，
+  高层NN覆盖 .898/.915 -> .893/.910 -> .890/.910，中层覆盖 .979/.968 ->
+  .973/.964 -> .972/.962。部分指标退步，但幅度/方向不是可靠地点真值判据。
+  1292->61完整固定p95 .621/1.288 -> .617/1.313 -> .621/1.315m；留出中层覆盖
+  .963/.601、高层 .932/.895，依旧没有暴露明显崩溃或消除方向不对称。
+
+  高层proxy/非地面空间支持不能偷换为非重复的人工稳定结构：
+  1292->61生产full高层 .932/.895覆盖、2m bodyXY格94/98、最大单格占比.079/.067，
+  多对一率.169/.144，固定两法向角p95 4.4/5.8deg；1321->582对应.893/.910、
+  123/115格、.017/.018、多对一.106/.087、2.2/10.9deg。它们本身有广泛分布支持，
+  但这仍可来自重复结构/相关邻扫，不证明真实重访或最终图正确。
+
+  holdout_three_way_geometry.csv为192数据行：4对×双向×4层×全点/共同支持proxy
+  ×prediction/full/holdout。已断言每组的完整点数、固定可信法向计数三方完全一致。
+  对应subset绝不随solver重选；NN是明确标记的动态nearest指标。
+  某层fixed_two_normal_points=0时normal角为NaN，表示无足够固定可信法向，不是0度。
+  原始prior共同支持proxy、非地面中高层、点到面、法向、多对一和空间分布均保留。
+
+最终结论
+  已排除这批实际配准输入的200k截断；4个固定代表没有证据支持raw/small-window
+  替代生产子图，也没有证据证明留扫结构指标可靠区分正常/恶化。不能据4对设置
+  新阈值或生成真/假地点标签。保留这些负结果与原始指标。
+  fine-only仅证明这4个已接近局部解的固定对可更快到近同解，尚不证明竞争者、
+  大初值误差或全序列安全，不推荐替换full竞争验证。主线保持v3策略/阈值/子图；
+  内容完全相等的FPFH缓存可作为另一个不改变候选/几何语义的性能实验独立验收。
+
+Cache小实验（未控随机种子，不能放行）
+  cache_benchmark CLI模式已新增，选择规则TDD RED->GREEN，总6项probe行为测试通过。
+  每固定source取实际events中首3个唯一已配准candidate，加当帧实际fitness拒绝和
+  已提交candidate，按CSV行序，每帧最多5个。17对，cache0/16共34次full注册，
+  子图/原配置/前query图/输入点对象完全相同；fine线程1、OMP4、BLAS1。
+  winner通知可能延后，CSV顺序不称线上registration-start顺序。
+  真实原pool覆盖success、fitness reject、不收敛、pose guard reject，不造案例。
+
+  未控seed输出 submaps/cache_benchmark_v1/，exit2，17/17超过严格数值等价容差，
+  14/17判定签名相同。最终单对geometry+pose通过数均9/17，但等计数不等于同判定。
+  cache16 stats 13hits/21misses/16entries；cache0禁用stats全0，不伪造miss计数。
+  已查明matcher srand(time(NULL))，节省时间可能改变种子，且默认FPFH对象生命周期
+  需另核对；本轮差异不能单独归因cache错误，更不能宣称语义等价。
+  registration wall总和11810.55/9920.31ms、coarse6272.07/4836.52ms均受种子/粗解/
+  fine收敛差异混杂，不能作为cache-only性能收益。全部原始差异保留。
+  详见 cache_benchmark_unseeded_status.txt、cache_equivalence.csv、SHA及ldd记录。
+  随后root提供time()冻结shim且恢复default单FPFH对象顺序，受控审计如下。
+
+受控cache审计 / 并行非确定性 / 反序负对照
+  原始17pair的源/目标只构建一次，两capacity使用同一对象/点序/强度/前query图，
+  所有选定候选都完整注册，缓存不豁免任何竞争者。模式prepared_audit另做特征核对。
+  A2W_CACHE_BENCHMARK_REVERSE=1仅反转capacity执行block为16->0；0始终为对照。
+  新增selection/33bin bitwise/反序顺序测试均先RED再GREEN，共8项probe测试通过。
+
+  发现第三方并行状态：
+    third_party/TEASER-plusplus/teaser/src/graph.cc:38 in.threads=12；
+    third_party/pmc/pmc_heu.cpp:77-80 dynamic schedule + num_threads(num_threads)；
+    同文件critical仅在严格更大clique时更新，等大候选的先后可影响选择。
+  matcher的srand(time(NULL))也使墙钟运行速度影响随机种子。shim仅冻结libc time，
+  steady/perf_counter仍真实前进（cache_seeded_clock_check.txt），不修改生产matcher。
+
+  全部原实验保留；paired严格容差从未放宽：
+    run目录后缀                      seed        OMP_THREAD_LIMIT   数值PASS / 判定签名PASS
+    cache_benchmark_v1               未控        未设               0/17       14/17
+    cache_benchmark_seeded            1792531200  未设              14/17       17/17
+    ...seeded_1729000000              1729000000  未设              17/17       17/17
+    ...1792531200_omp_limit1          1792531200  1                 17/17       17/17
+    ...1729000000_omp_limit4          1729000000  4                 17/17       17/17
+    ...1729000000_omp_limit4_reverse  1729000000  4                 16/17       17/17
+  目录全在artifacts/loop_v4_20261021/submaps/；summary CSV保留逐轮真实总时延。
+  source每帧变化自然miss；target28在614/1292、target24在614/1321图变化后hash也变，
+  没有按KF ID错误复用。各轮cache16为13hits/21misses/16entries，无越容量。
+
+  real17 prepared_features.csv有102组/54,936,783个float bins比较：
+    旧同单FPFH对象source->target vs public prepare；prepare vs重复prepare；
+    prepare vs本工具持有的Prepared对象（独立诊断LRU，不窥探私有cache）。
+  逐bin/逐字节mismatch全部0，nonfinite全部0，held对象复用13hit/21miss。
+  probe加OpenMP编译/链接与common一致，避免直接构造PCL inline estimator时线程宏
+  和weak-symbol语义不同。输出prepared_audit_real17/，不做配准、不更改pipeline。
+
+  seed1792531200未限线程的3个差异pair，在OMP_THREAD_LIMIT=1后全部数值相同；
+  配合特征逐字节相同，支持下游并行PMC择优/调度是额外非确定性来源，但不能宣称
+  这一对照已形式化排除全部其他并行来源。
+  反序limit4仍有1292->62异常：coarse差.288914m/.005776rad，fine差.6719mm/
+  .00001076rad、fitness差2.33e-6，超过原门限，保留失败、不改tol。
+  此次cache16异常调用是0hit/2miss，两侧都重新prepare，不是旧feature命中；
+  两轮cache0自身17pair全部同tol，cache16自身仅该pair异。不能据“判定都一样”
+  宣称数值等价已全部通过，也不能把异常自动等价为stale-cache错误。
+
+  指定seed1729000000 + limit4正序：wall11533.53->10707.55ms(-7.16%)，
+  coarse6757.54->5758.94ms(-14.78%)。反序wall11411.38->8851.60ms，但含上述
+  数值失败且fine迭代耗时/运行负载也变化；不要合并成精确cache-only加速承诺。
+  这是单次block小实验，资源上限本身不同于旧v3；完整序列须同seed/同资源/
+  同队列条件作对照，不能把所有时延差只归cache。
+  原pool包含真实fitness拒绝1292->18，但1729受控运行它变成fine失败；受控两侧
+  实际分布均geometry accepted13/fine失败4、最终geometry+pose通过9/17。
+  因而不能伪称该受控轮验证过fitness-reject分支。未控轮的fitness拒绝也不冒充
+  同seed等价证据。没有人为生成成功率或真/假地点标签。
+
+  当前结论：特征复用/容量/内容失效有直接证据；全数值确定等价仍有反序负结果。
+  只可把cache继续作为性能实验考察，不得据7%或17/17某一轮宣称全序列语义等价、
+  质量验收或机器人可部署。完成最后反序后已停止重CPU，完整paced期间仅轻量IO统计。
+
+最终完整回放几何验收：clean / v3 / v4 cached_full_paced
+  结论：固定地图几何非退步验收仍不通过，NOT_ACCEPTED。地面部分改善不能抵消
+  非地面及A参考区退步；不知道实际误回环数量，所有地点真/假标签继续unknown。
+  这里只做最终图的离线内部一致性评价，不新增配准、重放或线上oracle。
+
+  输入轨迹分别为：
+    artifacts/loop_recall_v3_20261020/baseline_live_full_clean/optimized_poses.csv
+    artifacts/loop_recall_v3_20261020/scheduled_live_full_paced/optimized_poses.csv
+    artifacts/loop_v4_20261021/cached_full_paced/optimized_poses.csv
+  每份均完整1490pose。原1026 ground pairs / 59 non-ground pairs原样保留。
+  直接复用fixed_layers_v3.npz，SHA256仍为
+  a74efd641c1abed1f05dd76b28f85bbb30c5b17506e94f4225b043ab4b898eea。
+  旧非地面对69302个有向固定对应，原身份22c7d615d64df3a8e65db03cc84a9930883bdf1f0e832049148095178fb59c3a。
+  完整点评价1007095个有向点实例（跨pair重复，不是1007095个独立unique点）；
+  低/中/高分别589637/161179/256279，不重选点、对应、法向、阈值或高度层。
+  高度仍为原local-ground proxy，并非物理gravity或人工屋顶标签。
+  这些已在前几轮使用的评价对不是独立盲测集，原保存图选择亦有偏。
+
+  主脚本原样运行，各轨迹472层行+1026 ground行。额外2832方向行已断言按点数
+  加权严格重现主脚本coverage；全部变体固定点数和可信法向计数一致。
+  输出 artifacts/loop_v4_20261021/final_geometry/：summary.json、三套layer_pairs/
+  ground_invariant、all_pair_metric_deltas.csv、paired_regression_counts.csv、
+  regional_nonregression.csv、directional_fixed_coverage.csv、focus_pairs_three_way.csv、
+  ground_region_statistics.csv；输入/输出SHA在inputs.sha256/outputs.sha256。
+  derive_fixed_reports.py为可复现只读派生工具，不估计法向或新增匹配对应。
+
+  1026 ground固定旋转不变指标（不是世界Z强制共面）：
+    metric                              clean        v3          v4
+    symmetric point-to-plane RMS的P95 m  .121662      .036500     .049032
+    plane-normal angle P95 deg           .898939      .873515    1.011385
+    frozen-anchor distance P95 m         .121742      .425736     .447420
+  冻结anchor切向偏移不是独立真值；plane残差降低不证明切向结构对齐。
+  A冻结成员两端均在参考区的419 ground pairs：plane RMS P95 .100782/.036760/
+  .045615m，normal P95 .877199/.828002/1.103162deg；v4相较v3也有退步。
+
+  59 legacy non-ground固定指标（P95先逐pair计算，再跨pair取中位）：
+    metric                           clean       v3          v4
+    fixed-match P95 median m         .818618     .822244     .821643
+    point-to-plane P95 median m      .262007     .315523     .315015
+  v4相对clean：38/59 fixed P95恶化>1mm（v3为40）；38/59 plane P95恶化>1mm
+  （v3为36）。最坏574<->1314，fixed P95 +.393452m、plane P95 +.485283m。
+  相对v3，v4仍有24/59 fixed P95及28/59 plane P95恶化>1mm，不能以中位微降称全面改善。
+  沿用旧4指标（fixed P95、NN P95、fixed coverage、plane P95）及>.001原单位：
+  v3/v4均50/59至少一项退步，A_reference均27/33，参考区保护未通过。
+  coverage原单位为比例（.001），不是1mm；normal另计.001deg，不混入旧4项门。
+  若额外计normal P95，v4为53/59、A为29/33；原四项与扩展口径分别保留。
+  A区本身fixed P95中位 .709299/.611906/.607468m虽改善，但plane P95中位
+  .215235/.253044/.250865m退步，且逐对非退步未过，不能只报有利中位数。
+  A_reference只是数据定义的暂定参考，不是已勘测正常/水平区域，不据此强行共面。
+
+  full-original低/中/高层跨pair fixed P95中位 m：
+              low         mid         high
+    clean    1.846558    1.912137    4.849542
+    v3       1.901028    1.880245    4.981416
+    v4       1.901839    1.869706    4.984381
+  对应fixed coverage中位：
+    clean     .719097     .714187     .636220
+    v3        .696070     .655899     .574730
+    v4        .695629     .655431     .582435
+  含原始难匹配/未覆盖点，米级尾部不等于声称整张地图处处有米级定位误差；不能删尾。
+  全点/各层的点到面、normal、距离、coverage逐pair完整保留，不仅上述总中位。
+
+  代表非地面（非线上候选选择，地点标签unknown）：
+    582<->1322 legacy fixed P95 .583394/.879344/.885083m，coverage .907113/
+    .666109/.655230；中层plane P95 .550344/.894676/.897499m，高层 .745743/
+    1.207567/1.210167m。高层fixed距离微降并不抵消plane/coverage退步。
+    70<->1298 legacy fixed P95 .581247/.775146/.772577m，coverage .916418/
+    .496269/.509701；高层plane P95 .268721/.092202/.090454m虽然改善，高层fixed
+    coverage却 .775821/.263611/.271417，normal P95 12.8300/13.2233/13.1984deg。
+    1170<->1214 legacy fixed P95 .308006/.317364/.377798m，plane P95
+    .141953/.130825/.200094m；这是v4新一轮不能隐藏的参考区退步。
+
+  双方向不能用单向nearest高覆盖替代固定对应：
+    70->1298全点fixed coverage clean/v3/v4=.8793/.4851/.4930，反向 .6108/
+    .3062/.3130；v4动态NN却 .9146/.6543。高层正向fixed .7336/.2500/.2574，
+    反向 .8203/.2780/.2862；v4高层NN .7835/.8668。新nearest能重新吸附别的点，
+    不能把它称原固定结构已对齐或独立共同可见真值。
+    582->1322中层fixed .3743/.2583/.2540，反向 .6738/.5143/.5084；v4动态NN
+    .4463/.7656。两方向、固定/nearest及每层分母均在方向CSV，未裁掉不利方向。
+
+  最终比较的边界：v4 matcher保留原wall-time RNG且资源明确limit4，v3资源口径
+  与随机运行状态并不相同，因此图差异不能单独归因FPFH缓存。缓存性能/实际队列
+  验收与此固定几何质量是不同问题；即使完整1490处理成功，也不构成地图质量通过。

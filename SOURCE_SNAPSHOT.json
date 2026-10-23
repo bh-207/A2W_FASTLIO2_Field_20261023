@@ -1,0 +1,53 @@
+{
+  "schema": "a2w_source_snapshot_v1",
+  "local_base_commit": "104288e76b4f8584fdbad047a8d9fc0c6d93b155",
+  "local_branch": "feature/a2w-navigation",
+  "target": "bh-207/A2W_FASTLIO2_Field_20261023",
+  "source_includes_uncommitted_changes": true,
+  "submodules": [
+    {
+      "path": "src/FAST_LIO_Hesai",
+      "mode": "160000",
+      "sha": "16e97cdcc4260b9ba6241518a19ad8384224ba48",
+      "type": "commit"
+    },
+    {
+      "path": "third_party/TEASER-plusplus",
+      "mode": "160000",
+      "sha": "974574c2fe8d8523e9f7d7be0500c427ba1d1f9a",
+      "type": "commit"
+    },
+    {
+      "path": "third_party/pmc",
+      "mode": "160000",
+      "sha": "a2dfd612a501bca83c47206255dbbff619481f97",
+      "type": "commit"
+    }
+  ],
+  "selected_field_build": "build_003",
+  "field_binaries_sha256": {
+    "frontend": "4fd35b07847c2c4907fbd27df001193a85c55f4b6ab10058888a7a87c3516007",
+    "ingress": "2c45365d001d787fb1e055c3f4dd75129416af60213a26da053970eec19e9cf8",
+    "backend": "93cfab4bb390198d36b4043642d3192f6e66c8f41267985a555fc3a829140b4c"
+  },
+  "field_original_math_sha256": {
+    "src/IMU_Processing.hpp": "1718a2af9d0ed9869fbd7fc3357bf12012c7b078ed69ad5e52e41cd1cdbace32",
+    "src/preprocess.cpp": "e53a4b48f821ebe8fa88a422570fdb52bfcddc1416d146b38ffa6b982367b570",
+    "include/use-ikfom.hpp": "1ee2c078ee757ff2dffedf48da764daec152baa79876a70785d010cc2e6165ab",
+    "include/IKFoM_toolkit/esekfom/esekfom.hpp": "b990411209fe06ae64112c8bc807b0c2a13922fc1460ec2745c6701cc9344e85"
+  },
+  "compiled_binaries_uploaded": false,
+  "robot_connected": false,
+  "production_modified": false,
+  "excluded_categories": [
+    "raw Bags and packet captures",
+    "factory maps and Map Bundles",
+    "runtime trajectories and sensor logs",
+    "generated build/install/artifacts",
+    "credentials and SSH configuration",
+    "P/R/J and enhanced-loop experiments",
+    "field driver interface archives and operational metadata"
+  ],
+  "retained_small_fixture_note": "Only the existing 3 source-controlled registration regression PCD fixtures (~200 KiB); no new field point clouds.",
+  "public_export_metadata_excluded": true
+}

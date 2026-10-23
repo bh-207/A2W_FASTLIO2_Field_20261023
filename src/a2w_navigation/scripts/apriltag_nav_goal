@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+
+from a2w_navigation.apriltag_nav_goal import main
+
+
+if __name__ == "__main__":
+    main()

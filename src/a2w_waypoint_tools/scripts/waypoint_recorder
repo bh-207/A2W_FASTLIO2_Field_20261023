@@ -1,0 +1,6 @@
+#!/usr/bin/python3
+from a2w_waypoint_tools.waypoint_recorder import main
+
+
+if __name__ == "__main__":
+    main()

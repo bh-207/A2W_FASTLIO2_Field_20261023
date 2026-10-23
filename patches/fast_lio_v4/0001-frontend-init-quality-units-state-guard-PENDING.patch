@@ -1,0 +1,756 @@
+--- a/src/IMU_Processing.hpp
++++ b/src/IMU_Processing.hpp
+@@ -1,4 +1,8 @@
+ #include <cmath>
++#include <atomic>
++#include <sstream>
++#include <iomanip>
++#include "frontend_init_v4.hpp"
+ #include <math.h>
+ #include <deque>
+ #include <mutex>
+@@ -20,6 +24,7 @@
+ #include <sensor_msgs/msg/point_cloud2.hpp>
+ #include <geometry_msgs/msg/vector3.hpp>
+ #include "use-ikfom.hpp"
++#include "frontend_init_state_v4.hpp"
+ 
+ /// *************Preconfiguration
+ 
+@@ -46,6 +51,10 @@
+   void set_acc_cov(const V3D &scaler);
+   void set_gyr_bias_cov(const V3D &b_g);
+   void set_acc_bias_cov(const V3D &b_a);
++  void set_frontend_init_v4(const frontend_init_v4::GateConfig &, const frontend_init_v4::InputConfig &, const std::string &trace_path, const frontend_init_v4::StateGuardConfig &state_config=frontend_init_v4::StateGuardConfig{});
++  void notify_frontend_input_rejection_v4(){if(init_gate_v4_.enabled())++input_rejections_v4_;}
++  bool frontend_init_v4_initialized()const{return !imu_need_init_;}
++  const frontend_init_v4::Stats &frontend_init_v4_stats()const{return init_gate_v4_.stats();}
+   Eigen::Matrix<double, 12, 12> Q;
+   void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
+ 
+@@ -59,6 +68,13 @@
+   double first_lidar_time;
+ 
+  private:
++  frontend_init_v4::Gate init_gate_v4_;
++  std::atomic<std::size_t> input_rejections_v4_{0};
++  std::ofstream init_trace_v4_;
++  frontend_init_v4::StateGuardConfig state_guard_config_v4_;
++  std::ofstream state_trace_v4_;
++  void trace_frontend_state_v4(const char *, const frontend_init_v4::StateGuardReport &, const frontend_init_v4::Stats &, const state_ikfom &, const state_ikfom *);
++  void trace_frontend_init_v4(const char *, const frontend_init_v4::Stats &, const state_ikfom &, bool);
+   void IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, int &N);
+   void UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI &pcl_in_out);
+ 
+@@ -109,6 +125,7 @@
+   imu_need_init_    = true;
+   start_timestamp_  = -1;
+   init_iter_num     = 1;
++  init_gate_v4_.reset();
+   v_imu_.clear();
+   IMUpose.clear();
+   last_imu_.reset(new sensor_msgs::msg::Imu());
+@@ -151,6 +168,134 @@
+ void ImuProcess::set_acc_bias_cov(const V3D &b_a)
+ {
+   cov_bias_acc = b_a;
++}
++
++
++void ImuProcess::set_frontend_init_v4(const frontend_init_v4::GateConfig &config,
++  const frontend_init_v4::InputConfig &input_config, const std::string &trace_path, const frontend_init_v4::StateGuardConfig &state_config)
++{
++  if(config.enabled && !input_config.enabled)
++    throw std::invalid_argument("v4 quality gate requires explicit SI input contract");
++
++  state_guard_config_v4_=state_config;
++  if(config.enabled)state_guard_config_v4_.validate();
++
++  init_gate_v4_=frontend_init_v4::Gate(config);
++  if(!config.enabled)return;
++  if(trace_path.empty() || std::ifstream(trace_path).good() || std::ifstream(trace_path+".metadata.json").good())
++    throw std::invalid_argument("v4 gate trace must be a new file; refusing overwrite");
++  std::ofstream effective_config_v4(trace_path+".metadata.json");
++  if(!effective_config_v4)throw std::runtime_error("cannot open effective v4 configuration sidecar");
++  auto quoted=[](const std::string &value){std::ostringstream out;out << '"';
++    for(unsigned char c:value){if(c=='"'||c=='\\')out << '\\' << c;
++      else if(c<32)out << "\\u00" << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned>(c);
++      else out << c;}out << '"';return out.str();};
++  effective_config_v4 << std::setprecision(17)
++    << "{\"schema\":\"frontend_init_v4_effective_config_v1\",\"base_commit\":\"16e97cdcc4260b9ba6241518a19ad8384224ba48\","
++    << "\"frames\":\"W=camera_init,I=body,L=LiDAR; no axis remap/world leveling\",\"source_provenance\":" << quoted(input_config.source_provenance)
++    << ",\"input\":{\"enabled\":" << (input_config.enabled?"true":"false")
++    << ",\"gyro_unit\":" << quoted(input_config.gyro_unit) << ",\"accel_unit\":" << quoted(input_config.accel_unit)
++    << ",\"frame_id\":" << quoted(input_config.frame_id) << ",\"gyro_evidence\":" << quoted(input_config.gyro_evidence)
++    << ",\"accel_evidence\":" << quoted(input_config.accel_evidence) << ",\"time_evidence\":" << quoted(input_config.time_evidence)
++    << ",\"imu_minus_lidar_offset_ns\":" << input_config.imu_minus_lidar_offset_ns
++    << ",\"offset_rule\":\"aligned=raw-offset exactly once; no self-sync\",\"internal_acc_normalization_retained\":true},\"gate\":{\"enabled\":true"
++    << ",\"minimum_samples\":" << config.minimum_samples << ",\"maximum_samples\":" << config.maximum_samples
++    << ",\"minimum_duration_s\":" << config.minimum_duration_s << ",\"maximum_gap_s\":" << config.maximum_gap_s
++    << ",\"maximum_gyro_norm_rad_s\":" << config.maximum_gyro_norm_rad_s
++    << ",\"maximum_mean_gyro_norm_rad_s\":" << config.maximum_mean_gyro_norm_rad_s
++    << ",\"gyro_variance_limit\":" << config.gyro_variance_limit << ",\"accel_variance_limit\":" << config.accel_variance_limit
++    << ",\"minimum_accel_norm_m_s2\":" << config.minimum_accel_norm_m_s2 << ",\"maximum_accel_norm_m_s2\":" << config.maximum_accel_norm_m_s2
++    << ",\"maximum_direction_change_rad\":" << config.maximum_direction_change_rad
++    << "},\"warning\":\"Explicit caller declarations are not independent device-unit certification; IMU-only stationarity proxy, not calibration\"}\n";
++
++  const auto state_trace_path=trace_path+".state_checks.csv";
++  const auto state_meta_path=trace_path+".state_checks.metadata.json";
++  if(std::ifstream(state_trace_path).good()||std::ifstream(state_meta_path).good())
++    throw std::invalid_argument("state guard trace exists; refusing overwrite");
++  state_trace_v4_.open(state_trace_path);
++  if(!state_trace_v4_)throw std::runtime_error("cannot open state guard trace");
++  state_trace_v4_ << std::setprecision(17);
++  state_trace_v4_ << "phase,accepted,reason,first_stamp_ns,last_stamp_ns,window_count,mean_checked,last_checked,mean_rx,mean_ry,mean_rz,mean_norm,last_rx,last_ry,last_rz,last_norm,pre_P_symmetry,pre_P_min_pivot,candidate_P_symmetry,candidate_P_min_pivot,raw_ext_det,raw_ext_orthogonality,candidate_present";
++  for(const char *prefix:{"before","candidate"}){
++    for(const char *vector:{"pos","vel","bg","ba","ext_t","g_W"})
++      for(const char *axis:{"x","y","z"})state_trace_v4_ << ',' << prefix << '_' << vector << '_' << axis;
++    for(const char *rotation:{"q_WI","ext_q"})
++      for(const char *axis:{"x","y","z","w"})state_trace_v4_ << ',' << prefix << '_' << rotation << '_' << axis;
++  }
++  state_trace_v4_ << '\n';
++  std::ofstream state_metadata(state_meta_path);
++  if(!state_metadata)throw std::runtime_error("cannot open effective state guard metadata");
++  const auto &c=state_guard_config_v4_;
++  state_metadata << std::setprecision(17)
++    << "{\"schema\":\"frontend_v4_state_guard_v1\",\"enabled_by\":\"quality_gate_enabled only\",\"input_and_window_metadata\":\"adjacent quality CSV.metadata.json\","
++    << "\"policy\":\"preserve original fresh candidate; nonidentity KF requires explicit consistent restart; no bias or world repair\","
++    << "\"hardware_threshold_acceptance\":\"NOT_MEASURED_ON164\",\"expected_S2_norm_m_s2\":9.809,\"internal_acc_scale_numerator\":9.81,"
++    << "\"quaternion_norm_tolerance\":" << c.quaternion_norm_tolerance
++    << ",\"rotation_orthogonality_tolerance\":" << c.rotation_orthogonality_tolerance
++    << ",\"rotation_determinant_tolerance\":" << c.rotation_determinant_tolerance
++    << ",\"initial_rotation_identity_tolerance\":" << c.initial_rotation_identity_tolerance
++    << ",\"covariance_symmetry_tolerance\":" << c.covariance_symmetry_tolerance
++    << ",\"minimum_covariance_pivot\":" << c.minimum_covariance_pivot
++    << ",\"maximum_mean_accel_residual_m_s2\":" << c.maximum_mean_accel_residual_m_s2
++    << ",\"maximum_last_accel_residual_m_s2\":" << c.maximum_last_accel_residual_m_s2
++    << ",\"gravity_norm_tolerance_m_s2\":" << c.gravity_norm_tolerance_m_s2
++    << ",\"candidate_preservation_tolerance\":" << c.candidate_preservation_tolerance << "}\n";
++
++  init_trace_v4_.open(trace_path);
++  if(!init_trace_v4_)throw std::runtime_error("cannot open v4 initialization trace");
++  init_trace_v4_ << std::setprecision(17);
++  init_trace_v4_ << "stage,reason,first_stamp_ns,last_stamp_ns,accepted_samples,span_s,max_gap_s,max_direction_rad,reset_count,mean_ax,mean_ay,mean_az,mean_gx,mean_gy,mean_gz,var_ax,var_ay,var_az,var_gx,var_gy,var_gz,state_initialized,g_Wx,g_Wy,g_Wz,bgx,bgy,bgz,bax,bay,baz,ext_tx,ext_ty,ext_tz,ext_qx,ext_qy,ext_qz,ext_qw,q_WIx,q_WIy,q_WIz,q_WIw,window_member_stamps_ns\n";
++}
++
++
++void ImuProcess::trace_frontend_state_v4(const char *phase,
++  const frontend_init_v4::StateGuardReport &report,const frontend_init_v4::Stats &stats,
++  const state_ikfom &before,const state_ikfom *candidate)
++{
++  if(!state_trace_v4_)return;
++  state_trace_v4_ << phase << ',' << report.accepted << ',' << report.reason << ','
++    << stats.first_stamp_ns << ',' << stats.last_stamp_ns << ',' << stats.count
++    << ',' << report.mean_checked << ',' << report.last_checked;
++  const auto scalar=[&](double value){state_trace_v4_ << ',';if(std::isfinite(value))state_trace_v4_ << value;};
++  for(const auto &r:{report.mean_residual,report.last_residual}){
++    for(int k=0;k<3;++k)scalar(r[k]);scalar(r.norm());
++  }
++  for(double v:{report.pre_covariance_symmetry,report.pre_covariance_minimum_pivot,
++    report.candidate_covariance_symmetry,report.candidate_covariance_minimum_pivot,
++    report.raw_extrinsic_determinant,report.raw_extrinsic_orthogonality})scalar(v);
++  state_trace_v4_ << ',' << static_cast<bool>(candidate);
++  const auto write_state=[&](const state_ikfom *state){
++    if(!state){for(int k=0;k<26;++k)state_trace_v4_ << ',';return;}
++    // Actual invalid inputs retain nan/inf in their state fields; absent computed
++    // metrics above are empty, never a fabricated residual zero/PASS.
++    for(const auto &v:std::array<V3D,6>{V3D(state->pos),V3D(state->vel),V3D(state->bg),V3D(state->ba),V3D(state->offset_T_L_I),V3D(state->grav)})
++      for(int k=0;k<3;++k)state_trace_v4_ << ',' << v[k];
++    for(int k=0;k<4;++k)state_trace_v4_ << ',' << state->rot.coeffs()[k];
++    for(int k=0;k<4;++k)state_trace_v4_ << ',' << state->offset_R_L_I.coeffs()[k];
++  };
++  write_state(&before);write_state(candidate);state_trace_v4_ << std::endl;
++}
++
++void ImuProcess::trace_frontend_init_v4(const char *stage,
++  const frontend_init_v4::Stats &stats, const state_ikfom &state, bool initialized)
++{
++  if(!init_trace_v4_)return;
++  init_trace_v4_ << stage << ',' << stats.reason << ',' << stats.first_stamp_ns << ','
++    << stats.last_stamp_ns << ',' << stats.count << ',' << stats.span_s << ',' << stats.maximum_gap_s
++    << ',' << stats.maximum_direction_change_rad << ',' << stats.reset_count;
++  for(const auto &v:{stats.mean_acc,stats.mean_gyro,stats.variance_acc,stats.variance_gyro})
++    for(double value:v)init_trace_v4_ << ',' << value;
++  init_trace_v4_ << ',' << initialized;
++  for(int k=0;k<3;++k)init_trace_v4_ << ',' << state.grav[k];
++  for(const auto &v:std::array<V3D,3>{V3D(state.bg),V3D(state.ba),V3D(state.offset_T_L_I)})
++    for(int k=0;k<3;++k)init_trace_v4_ << ',' << v[k];
++  const auto eq=state.offset_R_L_I.coeffs(),q=state.rot.coeffs();
++  for(int k=0;k<4;++k)init_trace_v4_ << ',' << eq[k];
++  for(int k=0;k<4;++k)init_trace_v4_ << ',' << q[k];
++  init_trace_v4_ << ',';
++  if(std::string(stage)!="sample_rejected")
++    for(auto stamp:init_gate_v4_.member_stamps_ns())init_trace_v4_ << stamp << ';';
++  init_trace_v4_ << std::endl;
+ }
+ 
+ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, int &N)
+@@ -346,6 +491,86 @@
+ 
+   if (imu_need_init_)
+   {
++
++    if(init_gate_v4_.enabled())
++    {
++      if(b_first_frame_){first_lidar_time=meas.lidar_beg_time;b_first_frame_=false;}
++      const auto consume_rejection=[&](){
++        if(!input_rejections_v4_.exchange(0))return false;
++        init_gate_v4_.invalidate_input();
++        trace_frontend_init_v4("input_group_invalidated",init_gate_v4_.last_rejected_stats(),kf_state.get_x(),false);
++        return true;
++      };
++      // A callback-rejected suffix must not turn the valid prefix into a
++      // supposedly stationary group. Discard the whole affected group.
++      if(consume_rejection()){last_imu_=meas.imu.back();return;}
++      // Evaluate every sample in this synchronized group. Ready is not latched
++      // mid-group: later motion/invalid timing cancels an earlier valid prefix.
++      for(const auto &imu:meas.imu)
++      {
++        frontend_init_v4::Sample input;
++        input.stamp_ns=static_cast<std::int64_t>(imu->header.stamp.sec)*1000000000LL+imu->header.stamp.nanosec;
++        input.acc={imu->linear_acceleration.x,imu->linear_acceleration.y,imu->linear_acceleration.z};
++        input.gyro={imu->angular_velocity.x,imu->angular_velocity.y,imu->angular_velocity.z};
++        input.frame_id=imu->header.frame_id;input.gyro_unit="rad/s";input.accel_unit="m/s^2";
++        const auto resets=init_gate_v4_.stats().reset_count;
++        init_gate_v4_.feed(input);
++        if(init_gate_v4_.stats().reset_count!=resets)
++          trace_frontend_init_v4("sample_rejected",init_gate_v4_.last_rejected_stats(),kf_state.get_x(),false);
++      }
++      last_imu_=meas.imu.back();
++      if(consume_rejection())return;
++      trace_frontend_init_v4("group_evaluated",init_gate_v4_.stats(),kf_state.get_x(),false);
++      if(!init_gate_v4_.ready())return;
++
++      const auto stats=init_gate_v4_.stats();
++      const V3D ready_mean_acc(stats.mean_acc[0],stats.mean_acc[1],stats.mean_acc[2]);
++      const V3D ready_mean_gyr(stats.mean_gyro[0],stats.mean_gyro[1],stats.mean_gyro[2]);
++      const auto before=kf_state.get_x();const auto before_P=kf_state.get_P();
++      auto state_report=frontend_init_v4::check_state_inputs(before,before_P,
++        Lidar_R_wrt_IMU,Lidar_T_wrt_IMU,
++        std::array<V3D,4>{V3D(cov_acc_scale),V3D(cov_gyr_scale),V3D(cov_bias_acc),V3D(cov_bias_gyr)},
++        state_guard_config_v4_);
++      trace_frontend_state_v4("preconditions",state_report,stats,before,nullptr);
++      const auto reject_state=[&](){
++        auto rejected_stats=stats;rejected_stats.reason=state_report.reason;
++        trace_frontend_init_v4("state_check_rejected",rejected_stats,kf_state.get_x(),false);
++        init_gate_v4_.invalidate_state(state_report.reason);
++      };
++      if(!state_report.accepted){reject_state();return;}
++      // Keep original fresh numerical construction. All validation occurs on
++      // copies before either actual KF state or covariance can change.
++      auto initial=before;
++      initial.grav=S2(-ready_mean_acc/ready_mean_acc.norm()*G_m_s2);
++      initial.bg=ready_mean_gyr;
++      initial.offset_T_L_I=Lidar_T_wrt_IMU;initial.offset_R_L_I=Lidar_R_wrt_IMU;
++      auto initial_P=before_P;initial_P.setIdentity();
++      initial_P(6,6)=initial_P(7,7)=initial_P(8,8)=.00001;
++      initial_P(9,9)=initial_P(10,10)=initial_P(11,11)=.00001;
++      initial_P(15,15)=initial_P(16,16)=initial_P(17,17)=.0001;
++      initial_P(18,18)=initial_P(19,19)=initial_P(20,20)=.001;
++      initial_P(21,21)=initial_P(22,22)=.00001;
++      const V3D state_last_acc(last_imu_->linear_acceleration.x,last_imu_->linear_acceleration.y,last_imu_->linear_acceleration.z);
++      state_report=frontend_init_v4::check_state_candidate(before,initial,initial_P,
++        Lidar_R_wrt_IMU,Lidar_T_wrt_IMU,ready_mean_acc,ready_mean_gyr,state_last_acc,state_guard_config_v4_,state_report);
++      trace_frontend_state_v4("candidate",state_report,stats,before,&initial);
++      if(!state_report.accepted){reject_state();return;}
++      mean_acc=ready_mean_acc;mean_gyr=ready_mean_gyr;
++      kf_state.change_x(initial);kf_state.change_P(initial_P);
++      cov_acc=cov_acc_scale;cov_gyr=cov_gyr_scale;imu_need_init_=false;
++      const auto committed_state=kf_state.get_x();
++      trace_frontend_state_v4("committed",state_report,stats,before,&committed_state);
++
++      // Establish the real deskew/prediction boundary at the accepted scan.
++      last_lidar_end_time_=meas.lidar_end_time;
++      angvel_last=V3D(last_imu_->angular_velocity.x,last_imu_->angular_velocity.y,last_imu_->angular_velocity.z)-initial.bg;
++      const V3D last_acc(last_imu_->linear_acceleration.x,last_imu_->linear_acceleration.y,last_imu_->linear_acceleration.z);
++      acc_s_last=initial.rot*(last_acc*G_m_s2/mean_acc.norm()-initial.ba)+V3D(initial.grav);
++      trace_frontend_init_v4("initialized",stats,kf_state.get_x(),true);
++      std::cout << "IMU Initial Done [v4 accepted_samples=" << stats.count << " span_s=" << stats.span_s << "]" << std::endl;
++      return;
++    }
++
+     /// The very first lidar frame
+     IMU_init(meas, kf_state, init_iter_num);
+ 
+--- a/src/laserMapping.cpp
++++ b/src/laserMapping.cpp
+@@ -114,6 +114,9 @@
+ bool    imu_gyr_unit_resolved = false;
+ string  imu_gyr_unit_mode = "auto";
+ vector<double> imu_acc_norm_samples;
++frontend_init_v4::InputConfig frontend_input_config_v4;
++std::unique_ptr<frontend_init_v4::InputAdapter> frontend_input_adapter_v4;
++std::ofstream frontend_input_trace_v4;
+ 
+ vector<vector<int>>  pointSearchInd_surf; 
+ vector<BoxPointType> cub_needrm;
+@@ -376,6 +379,38 @@
+     sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
+     
+ 
++
++    if(frontend_input_config_v4.enabled)
++    {
++      frontend_init_v4::Sample raw;
++      raw.stamp_ns=static_cast<std::int64_t>(msg_in->header.stamp.sec)*1000000000LL+msg_in->header.stamp.nanosec;
++      raw.frame_id=msg_in->header.frame_id;raw.gyro_unit=frontend_input_config_v4.gyro_unit;raw.accel_unit=frontend_input_config_v4.accel_unit;
++      raw.acc={msg_in->linear_acceleration.x,msg_in->linear_acceleration.y,msg_in->linear_acceleration.z};
++      raw.gyro={msg_in->angular_velocity.x,msg_in->angular_velocity.y,msg_in->angular_velocity.z};
++      frontend_init_v4::Sample si;
++      try{si=frontend_input_adapter_v4->adapt(raw);}
++      catch(const std::invalid_argument &error)
++      {
++        p_imu->notify_frontend_input_rejection_v4();
++        frontend_input_trace_v4 << "rejected," << raw.stamp_ns << ",," << raw.frame_id << ',' << raw.gyro_unit << ',' << raw.accel_unit << ",0,0";
++        for(const auto &v:{raw.acc,raw.gyro})for(double x:v)frontend_input_trace_v4 << ',' << x;
++        frontend_input_trace_v4 << ",,,,,," << std::endl;
++        RCLCPP_ERROR(rclcpp::get_logger("laserMapping"),"v4 IMU rejected: %s",error.what());return;
++      }
++      if(si.stamp_ns/1000000000LL>std::numeric_limits<std::int32_t>::max())
++      {p_imu->notify_frontend_input_rejection_v4();RCLCPP_ERROR(rclcpp::get_logger("laserMapping"),"v4 aligned IMU stamp exceeds ROS sec range");return;}
++      msg->header.stamp.sec=static_cast<std::int32_t>(si.stamp_ns/1000000000LL);
++      msg->header.stamp.nanosec=static_cast<std::uint32_t>(si.stamp_ns%1000000000LL);
++      msg->linear_acceleration.x=si.acc[0];msg->linear_acceleration.y=si.acc[1];msg->linear_acceleration.z=si.acc[2];
++      msg->angular_velocity.x=si.gyro[0];msg->angular_velocity.y=si.gyro[1];msg->angular_velocity.z=si.gyro[2];
++      frontend_input_trace_v4 << "adapted," << raw.stamp_ns << ',' << si.stamp_ns << ',' << raw.frame_id << ','
++        << raw.gyro_unit << ',' << raw.accel_unit << ',' << si.conversion_count << ',' << si.time_adjustment_count;
++      for(const auto &v:{raw.acc,raw.gyro,si.acc,si.gyro})for(double x:v)frontend_input_trace_v4 << ',' << x;
++      frontend_input_trace_v4 << std::endl;
++      mtx_buffer.lock();
++    }
++    else
++    {
+     msg->header.stamp = get_ros_time(get_time_sec(msg_in->header.stamp) - time_diff_lidar_to_imu);
+     if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
+     {
+@@ -408,9 +443,12 @@
+         msg->angular_velocity.z *= M_PI / 180.0;
+     }
+ 
++
++    }
+     double timestamp = get_time_sec(msg->header.stamp);
+     if (timestamp < last_timestamp_imu)
+     {
++        if(frontend_input_config_v4.enabled)p_imu->notify_frontend_input_rejection_v4();
+         std::cerr << "imu loop back, clear buffer" << std::endl;
+         imu_buffer.clear();
+     }
+@@ -971,6 +1009,71 @@
+                 imu_gyr_unit_mode.c_str());
+             imu_gyr_unit_mode = "auto";
+         }
++
++        // Default-off experimental contract. No numeric inference of corrected
++        // driver units; all claims require explicit source evidence.
++        frontend_input_config_v4.enabled=this->declare_parameter<bool>("frontend_init_v4.input_interface_enabled",false);
++        frontend_input_config_v4.gyro_unit=this->declare_parameter<string>("frontend_init_v4.input_gyro_unit","unknown");
++        frontend_input_config_v4.accel_unit=this->declare_parameter<string>("frontend_init_v4.input_accel_unit","unknown");
++        frontend_input_config_v4.frame_id=this->declare_parameter<string>("frontend_init_v4.input_imu_frame","unknown");
++        frontend_input_config_v4.gyro_evidence=this->declare_parameter<string>("frontend_init_v4.gyro_unit_evidence","");
++        frontend_input_config_v4.accel_evidence=this->declare_parameter<string>("frontend_init_v4.accel_unit_evidence","");
++        frontend_input_config_v4.time_evidence=this->declare_parameter<string>("frontend_init_v4.time_offset_evidence","");
++        frontend_input_config_v4.source_provenance=this->declare_parameter<string>("frontend_init_v4.source_provenance","unknown");
++        if(frontend_input_config_v4.enabled)
++        {
++          if(!std::isfinite(time_diff_lidar_to_imu)||std::abs(time_diff_lidar_to_imu)>1e6)
++            throw std::invalid_argument("invalid v4 fixed offset range");
++          frontend_input_config_v4.imu_minus_lidar_offset_ns=std::llround(time_diff_lidar_to_imu*1e9);
++          if(frontend_input_config_v4.source_provenance!="synthetic"&&frontend_input_config_v4.source_provenance!="real")
++            throw std::invalid_argument("v4 source_provenance must explicitly be synthetic or real");
++          frontend_input_adapter_v4.reset(new frontend_init_v4::InputAdapter(frontend_input_config_v4));
++          const string legacy_mode=frontend_input_config_v4.gyro_unit=="rad/s"?"rad":"deg";
++          if(imu_gyr_unit_mode!=legacy_mode||time_sync_en)
++            throw std::invalid_argument("v4 explicit gyro mode mismatch or second time synchronization enabled");
++          // Converted messages are SI; never run the legacy conversion again.
++          imu_gyr_is_deg=false;imu_gyr_unit_resolved=true;
++          const auto path=this->declare_parameter<string>("frontend_init_v4.input_trace_path",DEBUG_FILE_DIR("input_interface_v4.csv"));
++          if(std::ifstream(path).good())throw std::invalid_argument("v4 input trace exists; refusing overwrite");
++          frontend_input_trace_v4.open(path);
++          if(!frontend_input_trace_v4)throw std::runtime_error("cannot open v4 input trace");
++          frontend_input_trace_v4 << std::setprecision(17)
++            << "status,raw_stamp_ns,aligned_stamp_ns,input_frame,source_gyro_unit,source_accel_unit,conversion_count,time_adjustment_count,raw_ax,raw_ay,raw_az,raw_gx,raw_gy,raw_gz,si_ax,si_ay,si_az,si_gx,si_gy,si_gz\n";
++          RCLCPP_INFO(this->get_logger(),"v4 source gyro=%s [%s] acc=%s [%s] offset=t_IMU_raw-t_LiDAR %.9f s applied ONCE by subtraction [%s]; axes unchanged; internal9.81/mean_acc scaling remains",
++            frontend_input_config_v4.gyro_unit.c_str(),frontend_input_config_v4.gyro_evidence.c_str(),
++            frontend_input_config_v4.accel_unit.c_str(),frontend_input_config_v4.accel_evidence.c_str(),
++            time_diff_lidar_to_imu,frontend_input_config_v4.time_evidence.c_str());
++        }
++        frontend_init_v4::GateConfig v4_gate;
++        v4_gate.enabled=this->declare_parameter<bool>("frontend_init_v4.quality_gate_enabled",false);
++        const int v4_min_samples=this->declare_parameter<int>("frontend_init_v4.minimum_samples",200);
++        if(v4_min_samples<2)throw std::invalid_argument("v4 minimum_samples must be>=2");
++        v4_gate.minimum_samples=static_cast<std::size_t>(v4_min_samples);
++        v4_gate.minimum_duration_s=this->declare_parameter<double>("frontend_init_v4.minimum_duration_s",1.);
++        v4_gate.maximum_gap_s=this->declare_parameter<double>("frontend_init_v4.maximum_gap_s",.02);
++        v4_gate.maximum_gyro_norm_rad_s=this->declare_parameter<double>("frontend_init_v4.maximum_gyro_norm_rad_s",.05);
++        v4_gate.maximum_mean_gyro_norm_rad_s=this->declare_parameter<double>("frontend_init_v4.maximum_mean_gyro_norm_rad_s",.02);
++        v4_gate.gyro_variance_limit=this->declare_parameter<double>("frontend_init_v4.gyro_variance_limit",1e-5);
++        v4_gate.accel_variance_limit=this->declare_parameter<double>("frontend_init_v4.accel_variance_limit",.04);
++        v4_gate.minimum_accel_norm_m_s2=this->declare_parameter<double>("frontend_init_v4.minimum_accel_norm_m_s2",9.);
++        v4_gate.maximum_accel_norm_m_s2=this->declare_parameter<double>("frontend_init_v4.maximum_accel_norm_m_s2",10.6);
++        v4_gate.maximum_direction_change_rad=this->declare_parameter<double>("frontend_init_v4.maximum_direction_change_rad",.02);
++        const auto v4_trace=this->declare_parameter<string>("frontend_init_v4.quality_trace_path",DEBUG_FILE_DIR("init_quality_v4.csv"));
++
++        frontend_init_v4::StateGuardConfig v4_state;
++        v4_state.quaternion_norm_tolerance=this->declare_parameter<double>("frontend_init_v4.state_quaternion_norm_tolerance",1e-6);
++        v4_state.rotation_orthogonality_tolerance=this->declare_parameter<double>("frontend_init_v4.state_rotation_orthogonality_tolerance",1e-6);
++        v4_state.rotation_determinant_tolerance=this->declare_parameter<double>("frontend_init_v4.state_rotation_determinant_tolerance",1e-6);
++        v4_state.initial_rotation_identity_tolerance=this->declare_parameter<double>("frontend_init_v4.state_initial_rotation_identity_tolerance",1e-8);
++        v4_state.covariance_symmetry_tolerance=this->declare_parameter<double>("frontend_init_v4.state_covariance_symmetry_tolerance",1e-10);
++        v4_state.minimum_covariance_pivot=this->declare_parameter<double>("frontend_init_v4.state_minimum_covariance_pivot",0.);
++        v4_state.maximum_mean_accel_residual_m_s2=this->declare_parameter<double>("frontend_init_v4.state_maximum_mean_accel_residual_m_s2",.05);
++        v4_state.maximum_last_accel_residual_m_s2=this->declare_parameter<double>("frontend_init_v4.state_maximum_last_accel_residual_m_s2",.25);
++        v4_state.gravity_norm_tolerance_m_s2=this->declare_parameter<double>("frontend_init_v4.state_gravity_norm_tolerance_m_s2",1e-6);
++        v4_state.candidate_preservation_tolerance=this->declare_parameter<double>("frontend_init_v4.state_candidate_preservation_tolerance",1e-12);
++
++        p_imu->set_frontend_init_v4(v4_gate,frontend_input_config_v4,v4_trace,v4_state);
++
+         this->get_parameter_or<int>("preprocess.scan_line", p_pre->N_SCANS, 16);
+         this->get_parameter_or<int>("preprocess.timestamp_unit", p_pre->time_unit, US);
+         this->get_parameter_or<int>("preprocess.scan_rate", p_pre->SCAN_RATE, 10);
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -107,6 +107,18 @@
+ 
+ ament_target_dependencies(fastlio_mapping ${dependencies})
+ 
++# Explicit experiment-only offline Process harness; no ROS init/publisher.
++option(FRONTEND_INIT_V4_BUILD_HARNESS "Build offline initialization mechanism harness" OFF)
++if(FRONTEND_INIT_V4_BUILD_HARNESS)
++  if(NOT EXISTS "${FRONTEND_INIT_V4_HARNESS_SOURCE}")
++    message(FATAL_ERROR "Provide FRONTEND_INIT_V4_HARNESS_SOURCE")
++  endif()
++  add_executable(frontend_init_v4_harness "${FRONTEND_INIT_V4_HARNESS_SOURCE}" src/preprocess.cpp)
++  target_include_directories(frontend_init_v4_harness PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/include" ${PCL_INCLUDE_DIRS})
++  target_link_libraries(frontend_init_v4_harness ${PCL_LIBRARIES} Eigen3::Eigen ${cpp_typesupport_target})
++  ament_target_dependencies(frontend_init_v4_harness ${dependencies})
++endif()
++
+ # ---------------- Install --------------- #
+ install(TARGETS fastlio_mapping
+   DESTINATION lib/${PROJECT_NAME}
+--- /dev/null
++++ b/include/frontend_init_v4.hpp
+@@ -0,0 +1,184 @@
++#pragma once
++// Default-off experimental quality/unit contract. No ROS dependency or axis remap.
++// Thresholds require device calibration; low variance cannot rule out constant
++// linear acceleration. This is NOT motion-excited extrinsic/time calibration.
++#include <algorithm>
++#include <array>
++#include <cmath>
++#include <cstddef>
++#include <cstdint>
++#include <limits>
++#include <stdexcept>
++#include <string>
++#include <utility>
++#include <vector>
++
++namespace frontend_init_v4
++{
++using Vec3=std::array<double,3>;
++inline double norm(const Vec3 &v) {return std::hypot(v[0],v[1],v[2]);}
++inline bool finite(const Vec3 &v) {return std::all_of(v.begin(),v.end(),[](double x){return std::isfinite(x);});}
++
++struct Sample
++{
++  std::int64_t stamp_ns=0;
++  Vec3 acc{},gyro{};
++  std::string frame_id,gyro_unit,accel_unit;
++  unsigned conversion_count=0,time_adjustment_count=0;
++};
++
++struct InputConfig
++{
++  bool enabled=false;
++  std::string gyro_unit="unknown",accel_unit="unknown",frame_id="unknown";
++  std::string gyro_evidence,accel_evidence,time_evidence;
++  std::string source_provenance="unknown";
++  // Positive delta means the same physical event has t_IMU_raw > t_LiDAR.
++  // Apply ONCE: aligned IMU timestamp = raw IMU timestamp - delta.
++  std::int64_t imu_minus_lidar_offset_ns=0;
++};
++
++class InputAdapter
++{
++ public:
++  explicit InputAdapter(InputConfig config):config_(std::move(config))
++  {
++    if(!config_.enabled)return;
++    if((config_.gyro_unit!="rad/s"&&config_.gyro_unit!="deg/s")||
++       (config_.accel_unit!="m/s^2"&&config_.accel_unit!="g")||
++       config_.frame_id.empty()||config_.frame_id=="unknown"||
++       !evidence(config_.gyro_evidence)||!evidence(config_.accel_evidence)||!evidence(config_.time_evidence))
++      throw std::invalid_argument("explicit unit/frame/time evidence required; auto/unknown is not verified");
++  }
++  const InputConfig &config()const {return config_;}
++  Sample adapt(const Sample &raw)const
++  {
++    if(!config_.enabled)return raw;
++    if(raw.conversion_count||raw.time_adjustment_count)
++      throw std::invalid_argument("repeated unit conversion/time offset application");
++    if(raw.gyro_unit!=config_.gyro_unit||raw.accel_unit!=config_.accel_unit||raw.frame_id!=config_.frame_id)
++      throw std::invalid_argument("source unit/frame metadata mismatch; numeric unit guessing is forbidden");
++    if(raw.stamp_ns<0||!finite(raw.acc)||!finite(raw.gyro))
++      throw std::invalid_argument("invalid raw IMU timestamp or vector");
++    auto out=raw;
++    const auto delta=config_.imu_minus_lidar_offset_ns;
++    if((delta>0&&raw.stamp_ns<delta)||(delta<0&&raw.stamp_ns>std::numeric_limits<std::int64_t>::max()+delta))
++      throw std::invalid_argument("aligned timestamp outside nonnegative int64 range");
++    out.stamp_ns=raw.stamp_ns-delta;
++    const double gyro_scale=config_.gyro_unit=="deg/s"?3.14159265358979323846/180.:1.;
++    const double acc_scale=config_.accel_unit=="g"?9.81:1.;
++    for(std::size_t k=0;k<3;++k){out.gyro[k]*=gyro_scale;out.acc[k]*=acc_scale;}
++    if(!finite(out.acc)||!finite(out.gyro))throw std::invalid_argument("converted IMU overflow");
++    out.gyro_unit="rad/s";out.accel_unit="m/s^2";
++    out.conversion_count=1;out.time_adjustment_count=1;
++    return out;
++  }
++ private:
++  static bool evidence(const std::string &value){return !value.empty()&&value!="unknown";}
++  InputConfig config_;
++};
++
++struct GateConfig
++{
++  bool enabled=false;
++  std::size_t minimum_samples=200,maximum_samples=20000;
++  double minimum_duration_s=1.,maximum_gap_s=.02;
++  double maximum_gyro_norm_rad_s=.05,maximum_mean_gyro_norm_rad_s=.02;
++  double gyro_variance_limit=1e-5,accel_variance_limit=.04;
++  double minimum_accel_norm_m_s2=9.,maximum_accel_norm_m_s2=10.6;
++  double maximum_direction_change_rad=.02;
++};
++
++struct Stats
++{
++  std::size_t count=0,reset_count=0;
++  std::int64_t first_stamp_ns=-1,last_stamp_ns=-1;
++  Vec3 mean_acc{},mean_gyro{},variance_acc{},variance_gyro{};
++  double span_s=0,maximum_gap_s=0,maximum_direction_change_rad=0;
++  std::string reason="collecting";
++};
++
++class Gate
++{
++ public:
++  explicit Gate(GateConfig config=GateConfig{}):config_(config)
++  {
++    const auto positive=[](double v){return std::isfinite(v)&&v>0;};
++    if(!positive(config_.minimum_duration_s)||!positive(config_.maximum_gap_s)||
++       !positive(config_.maximum_gyro_norm_rad_s)||!positive(config_.maximum_mean_gyro_norm_rad_s)||
++       !positive(config_.gyro_variance_limit)||!positive(config_.accel_variance_limit)||
++       !positive(config_.minimum_accel_norm_m_s2)||!positive(config_.maximum_accel_norm_m_s2)||
++       !positive(config_.maximum_direction_change_rad)||config_.maximum_direction_change_rad>3.141592653589793||
++       config_.minimum_accel_norm_m_s2>=config_.maximum_accel_norm_m_s2||
++       config_.minimum_samples<2||config_.maximum_samples<config_.minimum_samples||config_.maximum_samples>1000000)
++      throw std::invalid_argument("invalid frontend initialization quality thresholds");
++  }
++  bool enabled()const{return config_.enabled;}
++  bool ready()const{return enabled()&&stats_.count>=config_.minimum_samples&&stats_.span_s+1e-12>=config_.minimum_duration_s;}
++  const GateConfig &config()const{return config_;}
++  const Stats &stats()const{return stats_;}
++  const Stats &last_rejected_stats()const{return rejected_;}
++  const std::vector<std::int64_t>&member_stamps_ns()const{return members_;}
++  void invalidate_input(){if(enabled())reject("input_interface_rejection");}
++  void invalidate_state(const std::string &reason){if(enabled())reject(reason);}
++  void reset()
++  {
++    stats_=Stats{};rejected_=Stats{};members_.clear();m2_acc_={};m2_gyro_={};
++    have_last_=false;last_seen_=0;anchor_={};
++  }
++  void feed(const Sample &sample)
++  {
++    if(!enabled())return;
++    if(sample.gyro_unit!="rad/s"||sample.accel_unit!="m/s^2")
++      throw std::invalid_argument("quality gate requires explicitly adapted SI input");
++    if(sample.stamp_ns<0||!finite(sample.acc)||!finite(sample.gyro)){reject("nonfinite_or_negative_stamp");return;}
++    double gap=0.;
++    const bool monotonic=!have_last_||sample.stamp_ns>last_seen_;
++    if(have_last_)gap=static_cast<double>(sample.stamp_ns-last_seen_)/1e9;
++    last_seen_=sample.stamp_ns;have_last_=true;
++    if(!monotonic){reject("non_monotonic_stamp");return;}
++    if(gap>config_.maximum_gap_s){reject("imu_gap");return;}
++    const double acc_norm=norm(sample.acc);
++    if(acc_norm<config_.minimum_accel_norm_m_s2||acc_norm>config_.maximum_accel_norm_m_s2)
++      {reject("accel_norm");return;}
++    if(norm(sample.gyro)>config_.maximum_gyro_norm_rad_s){reject("gyro_norm_motion");return;}
++    if(stats_.count>=config_.maximum_samples){reject("bounded_window_sample_capacity");return;}
++    if(stats_.count==0){stats_.first_stamp_ns=sample.stamp_ns;anchor_=sample.acc;gap=0.;}
++    double cosine=0.;for(std::size_t k=0;k<3;++k)cosine+=anchor_[k]*sample.acc[k];
++    cosine=std::clamp(cosine/(norm(anchor_)*acc_norm),-1.,1.);
++    const double angle=std::acos(cosine);
++    stats_.maximum_direction_change_rad=std::max(stats_.maximum_direction_change_rad,angle);
++    stats_.maximum_gap_s=std::max(stats_.maximum_gap_s,gap);
++    ++stats_.count;stats_.last_stamp_ns=sample.stamp_ns;
++    stats_.span_s=static_cast<double>(stats_.last_stamp_ns-stats_.first_stamp_ns)/1e9;
++    members_.push_back(sample.stamp_ns);
++    for(std::size_t k=0;k<3;++k) {
++      const double da=sample.acc[k]-stats_.mean_acc[k],dg=sample.gyro[k]-stats_.mean_gyro[k];
++      stats_.mean_acc[k]+=da/stats_.count;stats_.mean_gyro[k]+=dg/stats_.count;
++      m2_acc_[k]+=da*(sample.acc[k]-stats_.mean_acc[k]);m2_gyro_[k]+=dg*(sample.gyro[k]-stats_.mean_gyro[k]);
++      stats_.variance_acc[k]=std::max(0.,m2_acc_[k]/stats_.count);
++      stats_.variance_gyro[k]=std::max(0.,m2_gyro_[k]/stats_.count);
++    }
++    if(angle>config_.maximum_direction_change_rad){reject("accel_direction_instability");return;}
++    if(norm(stats_.mean_gyro)>config_.maximum_mean_gyro_norm_rad_s){reject("mean_gyro_motion_or_bias");return;}
++    if(*std::max_element(stats_.variance_acc.begin(),stats_.variance_acc.end())>config_.accel_variance_limit)
++      {reject("accel_variance");return;}
++    if(*std::max_element(stats_.variance_gyro.begin(),stats_.variance_gyro.end())>config_.gyro_variance_limit)
++      {reject("gyro_variance");return;}
++    stats_.reason=ready()?"window_ready_not_yet_committed":"collecting";
++  }
++ private:
++  void reject(const std::string &reason)
++  {
++    rejected_=stats_;rejected_.reason=reason;rejected_.reset_count=stats_.reset_count+1;
++    stats_=Stats{};stats_.reset_count=rejected_.reset_count;stats_.reason=reason;
++    m2_acc_={};m2_gyro_={};members_.clear();anchor_={};
++  }
++  GateConfig config_;
++  Stats stats_,rejected_;
++  Vec3 m2_acc_{},m2_gyro_{},anchor_{};
++  bool have_last_=false;
++  std::int64_t last_seen_=0;
++  std::vector<std::int64_t>members_;
++};
++} // namespace frontend_init_v4
+--- /dev/null
++++ b/include/frontend_init_state_v4.hpp
+@@ -0,0 +1,135 @@
++#pragma once
++// PENDING / NOT COMPILED: pre-commit startup state guard, quality gate only.
++// Include after use-ikfom.hpp. No world reorientation, bias reset or calibration.
++#include <Eigen/Cholesky>
++#include <array>
++#include <cmath>
++#include <limits>
++#include <stdexcept>
++#include <string>
++
++namespace frontend_init_v4 {
++struct StateGuardConfig {
++  double quaternion_norm_tolerance=1e-6;
++  double rotation_orthogonality_tolerance=1e-6;
++  double rotation_determinant_tolerance=1e-6;
++  double initial_rotation_identity_tolerance=1e-8;
++  double covariance_symmetry_tolerance=1e-10;
++  double minimum_covariance_pivot=0.;
++  double maximum_mean_accel_residual_m_s2=.05;
++  double maximum_last_accel_residual_m_s2=.25;
++  double gravity_norm_tolerance_m_s2=1e-6;
++  double candidate_preservation_tolerance=1e-12;
++  void validate()const {
++    for(double v:{quaternion_norm_tolerance,rotation_orthogonality_tolerance,
++      rotation_determinant_tolerance,initial_rotation_identity_tolerance,
++      covariance_symmetry_tolerance,maximum_mean_accel_residual_m_s2,
++      maximum_last_accel_residual_m_s2,gravity_norm_tolerance_m_s2,candidate_preservation_tolerance})
++      if(!std::isfinite(v)||v<=0.)throw std::invalid_argument("invalid initialization state guard tolerance");
++    if(!std::isfinite(minimum_covariance_pivot)||minimum_covariance_pivot<0.)
++      throw std::invalid_argument("invalid covariance pivot floor");
++    if(quaternion_norm_tolerance>.001||rotation_orthogonality_tolerance>.001||
++      rotation_determinant_tolerance>.001||initial_rotation_identity_tolerance>1e-6)
++      throw std::invalid_argument("startup state guard numerical rotation tolerances cannot disable proper/identity checks");
++  }
++};
++
++struct StateGuardReport {
++  bool accepted=false,mean_checked=false,last_checked=false;
++  std::string reason;
++  Eigen::Vector3d mean_residual=Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
++  Eigen::Vector3d last_residual=Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
++  double pre_covariance_symmetry=std::numeric_limits<double>::quiet_NaN();
++  double pre_covariance_minimum_pivot=std::numeric_limits<double>::quiet_NaN();
++  double candidate_covariance_symmetry=std::numeric_limits<double>::quiet_NaN();
++  double candidate_covariance_minimum_pivot=std::numeric_limits<double>::quiet_NaN();
++  double raw_extrinsic_determinant=std::numeric_limits<double>::quiet_NaN();
++  double raw_extrinsic_orthogonality=std::numeric_limits<double>::quiet_NaN();
++};
++
++inline bool proper_rotation(const Eigen::Matrix3d &r,const StateGuardConfig &c,
++  double * determinant=nullptr,double * orthogonality=nullptr){
++  if(!r.allFinite())return false;
++  const double d=r.determinant(),e=(r.transpose()*r-Eigen::Matrix3d::Identity()).cwiseAbs().maxCoeff();
++  if(determinant)*determinant=d;if(orthogonality)*orthogonality=e;
++  return std::isfinite(d)&&std::isfinite(e)&&std::abs(d-1.)<=c.rotation_determinant_tolerance&&e<=c.rotation_orthogonality_tolerance;
++}
++
++inline std::string state_structure_reason(const state_ikfom &s,const StateGuardConfig &c){
++  for(const auto &v:std::array<Eigen::Vector3d,6>{Eigen::Vector3d(s.pos),Eigen::Vector3d(s.vel),
++    Eigen::Vector3d(s.bg),Eigen::Vector3d(s.ba),Eigen::Vector3d(s.offset_T_L_I),Eigen::Vector3d(s.grav)})
++    if(!v.allFinite())return "nonfinite_vector";
++  const auto q=s.rot.coeffs(),ext=s.offset_R_L_I.coeffs();
++  if(!q.allFinite()||!ext.allFinite()||!std::isfinite(q.norm())||!std::isfinite(ext.norm())||
++    std::abs(q.norm()-1.)>c.quaternion_norm_tolerance||std::abs(ext.norm()-1.)>c.quaternion_norm_tolerance)
++    return "invalid_quaternion";
++  if(!proper_rotation(s.rot.toRotationMatrix(),c)||!proper_rotation(s.offset_R_L_I.toRotationMatrix(),c))return "nonproper_rotation";
++  if(std::abs(Eigen::Vector3d(s.grav).norm()-9.809)>c.gravity_norm_tolerance_m_s2)return "invalid_gravity_norm";
++  return {};
++}
++
++template<class Covariance>
++inline std::string covariance_reason(const Covariance &p,const StateGuardConfig &c,double &symmetry,double &minimum_pivot){
++  if(!p.allFinite())return "nonfinite";
++  symmetry=(p-p.transpose()).cwiseAbs().maxCoeff();
++  if(!std::isfinite(symmetry)||symmetry>c.covariance_symmetry_tolerance)return "asymmetric";
++  // No projection, symmetrization or silent replacement of a bad existing P.
++  Eigen::LDLT<Covariance> decomposition(p);
++  if(decomposition.info()!=Eigen::Success||!decomposition.vectorD().allFinite())return "not_positive_definite";
++  minimum_pivot=decomposition.vectorD().minCoeff();
++  if(minimum_pivot<=c.minimum_covariance_pivot)return "not_positive_definite";
++  return {};
++}
++
++template<class Covariance>
++inline StateGuardReport check_state_inputs(const state_ikfom &before,const Covariance &before_p,
++  const Eigen::Matrix3d &raw_ext_r,const Eigen::Vector3d &raw_ext_t,
++  const std::array<Eigen::Vector3d,4> &noise_variances,const StateGuardConfig &c){
++  StateGuardReport result;
++  const auto state_reason=state_structure_reason(before,c);
++  if(!state_reason.empty()){result.reason="state_pre_"+state_reason;return result;}
++  if((before.rot.toRotationMatrix()-Eigen::Matrix3d::Identity()).norm()>c.initial_rotation_identity_tolerance){
++    result.reason="state_requires_fresh_identity_rotation_restart";return result;}
++  if(!raw_ext_t.allFinite()||!raw_ext_r.allFinite()){result.reason="state_raw_extrinsic_nonfinite";return result;}
++  if(!proper_rotation(raw_ext_r,c,&result.raw_extrinsic_determinant,&result.raw_extrinsic_orthogonality)){
++    result.reason="state_raw_extrinsic_nonproper_rotation";return result;}
++  const auto p_reason=covariance_reason(before_p,c,result.pre_covariance_symmetry,result.pre_covariance_minimum_pivot);
++  if(!p_reason.empty()){result.reason="state_pre_covariance_"+p_reason;return result;}
++  for(const auto &v:noise_variances){
++    if(!v.allFinite()){result.reason="state_noise_variance_nonfinite";return result;}
++    if((v.array()<=0.).any()){result.reason="state_noise_variance_not_positive";return result;}}
++  result.accepted=true;result.reason="state_preconditions_pass";return result;
++}
++
++template<class Covariance>
++inline StateGuardReport check_state_candidate(const state_ikfom &before,const state_ikfom &candidate,
++  const Covariance &candidate_p,const Eigen::Matrix3d &raw_ext_r,const Eigen::Vector3d &raw_ext_t,
++  const Eigen::Vector3d &mean_acc,const Eigen::Vector3d &mean_gyro,const Eigen::Vector3d &last_acc,
++  const StateGuardConfig &c,StateGuardReport result){
++  result.accepted=false;
++  const auto state_reason=state_structure_reason(candidate,c);
++  if(!state_reason.empty()){result.reason="state_candidate_"+state_reason;return result;}
++  const auto p_reason=covariance_reason(candidate_p,c,result.candidate_covariance_symmetry,result.candidate_covariance_minimum_pivot);
++  if(!p_reason.empty()){result.reason="state_candidate_covariance_"+p_reason;return result;}
++  const double tol=c.candidate_preservation_tolerance;
++  if((candidate.pos-before.pos).norm()>tol||(candidate.vel-before.vel).norm()>tol||
++    (candidate.ba-before.ba).norm()>tol||(candidate.rot.toRotationMatrix()-before.rot.toRotationMatrix()).norm()>tol){
++    result.reason="state_candidate_preserved_state_changed";return result;}
++  if((candidate.offset_T_L_I-raw_ext_t).norm()>tol||
++    (candidate.offset_R_L_I.toRotationMatrix()-raw_ext_r).norm()>c.rotation_orthogonality_tolerance){
++    result.reason="state_candidate_extrinsic_mismatch";return result;}
++  if(!mean_acc.allFinite()||!mean_gyro.allFinite()||!last_acc.allFinite()||!std::isfinite(mean_acc.norm())||mean_acc.norm()<=0.){
++    result.reason="state_static_input_nonfinite_or_zero";return result;}
++  if((candidate.bg-mean_gyro).norm()>tol){result.reason="state_candidate_bg_window_mismatch";return result;}
++  // EXACT existing prediction domain: acceleration normalized by9.81/|mean_acc|,
++  // ba is preserved in that internal SI domain; no new bias or gravity estimate.
++  const double scale=9.81/mean_acc.norm();
++  result.mean_residual=candidate.rot*(mean_acc*scale-candidate.ba)+Eigen::Vector3d(candidate.grav);result.mean_checked=true;
++  if(!result.mean_residual.allFinite()||!std::isfinite(result.mean_residual.norm())){result.reason="state_mean_residual_nonfinite";return result;}
++  if(result.mean_residual.norm()>c.maximum_mean_accel_residual_m_s2){result.reason="state_mean_residual_above_threshold";return result;}
++  result.last_residual=candidate.rot*(last_acc*scale-candidate.ba)+Eigen::Vector3d(candidate.grav);result.last_checked=true;
++  if(!result.last_residual.allFinite()||!std::isfinite(result.last_residual.norm())){result.reason="state_last_residual_nonfinite";return result;}
++  if(result.last_residual.norm()>c.maximum_last_accel_residual_m_s2){result.reason="state_last_residual_above_threshold";return result;}
++  result.accepted=true;result.reason="state_consistency_pass";return result;
++}
++} // namespace frontend_init_v4

@@ -1,0 +1,3 @@
+# Optional, install in a venv created with --system-site-packages.
+# OpenCV comes from Ubuntu python3-opencv; no global pip upgrades are required.
+pupil-apriltags==1.0.4.post11

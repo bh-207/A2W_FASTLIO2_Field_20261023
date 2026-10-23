@@ -1,0 +1,118 @@
+--- /home/bh/A2W_FastLio2_controlled/.controlled_mapping/frontend/source/src/laserMapping.cpp
++++ /home/bh/A2W_FastLio2_controlled/captures/field_fixed_20261023_prepare_001/build_003/source/laserMapping.cpp
+@@ -1,3 +1,7 @@
++#define A2W_TRACE_ROS 1
++#include <iostream>
++#include <rclcpp/rclcpp.hpp>
++#include "startup_trace.hpp"
+ // This is an advanced implementation of the algorithm described in the
+ // following paper:
+ //   J. Zhang and S. Singh. LOAM: Lidar Odometry and Mapping in Real-time.
+@@ -653,6 +657,7 @@
+     laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
+     laserCloudmsg.header.frame_id = "body";
+     pubLaserCloudFull_body->publish(laserCloudmsg);
++    offline_handoff::event("frontend_cloud_publish_return",offline_handoff::stamp_ns(laserCloudmsg.header.stamp));
+     publish_count -= PUBFRAME_PERIOD;
+ }
+ 
+@@ -756,6 +761,7 @@
+     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
+     set_posestamp(odomAftMapped.pose);
+     pubOdomAftMapped->publish(odomAftMapped);
++    offline_handoff::event("frontend_odom_publish_return",offline_handoff::stamp_ns(odomAftMapped.header.stamp));
+     if (tum_save_en && fout_tum)
+     {
+         fout_tum << std::fixed << std::setprecision(9) << lidar_end_time << " "
+@@ -1179,8 +1185,8 @@
+         }
+ 
+         /*** ROS subscribe initialization ***/
+-        sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
+-        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, rclcpp::SensorDataQoS(), imu_cbk);
++
++
+         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
+         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
+         pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 20);
+@@ -1198,6 +1204,27 @@
+ 
+         map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
+ 
++        handoff_timer_ = this->create_wall_timer(std::chrono::milliseconds(100), [this] {
++          if(offline_handoff::report_ready("frontend",{
++            offline_handoff::edge(*this,pubOdomAftMapped_,"/Odometry",{"mapping_ingress_node","field_capture_observer_*","rosbag2_recorder"}),
++            offline_handoff::edge(*this,pubLaserCloudFull_body_,"/cloud_registered_body",{"mapping_ingress_node","field_capture_observer_*"})} ) && std::filesystem::exists(offline_handoff::trace->directory()/"live_release.json"))handoff_timer_->cancel();
++        });
++        // Live source continues recording; do not create sensor subscriptions until all output edges match.
++        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(45);
++        bool field_released=false;
++        while(rclcpp::ok()&&std::chrono::steady_clock::now()<deadline) {
++          bool matched=offline_handoff::report_ready("frontend",{
++            offline_handoff::edge(*this,pubOdomAftMapped_,"/Odometry",{"mapping_ingress_node","field_capture_observer_*","rosbag2_recorder"}),
++            offline_handoff::edge(*this,pubLaserCloudFull_body_,"/cloud_registered_body",{"mapping_ingress_node","field_capture_observer_*"})});
++          if(matched&&std::filesystem::exists(offline_handoff::trace->directory()/"live_release.json")){field_released=true;break;}
++          std::this_thread::sleep_for(std::chrono::milliseconds(50));
++        }
++        if(!field_released)throw std::runtime_error("live startup endpoint handshake timeout; no sensor intake started");
++        offline_handoff::event("live_sensor_intake_release",0);
++        const int field_depth=this->declare_parameter<int>("field_capture.imu_depth",100);
++        if(field_depth!=100)throw std::invalid_argument("field IMU depth must be 100");
++        sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
++        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, rclcpp::SensorDataQoS().keep_last(field_depth), imu_cbk);
+         RCLCPP_INFO(this->get_logger(), "Node init finished.");
+     }
+ 
+@@ -1254,6 +1281,12 @@
+                 runtime_state_writer_v4_->push(row_v4);
+             }
+ 
++            if(!extrinsic_est_en && p_imu->frontend_init_v4_initialized()) {
++              const auto field_x=kf.get_x();
++              if((field_x.offset_T_L_I-Lidar_T_wrt_IMU).norm()>1e-10 ||
++                 (field_x.offset_R_L_I.toRotationMatrix()-Lidar_R_wrt_IMU).norm()>1e-10)
++                throw std::runtime_error("fixed extrinsic state changed; refusing continued mapping");
++            }
+             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+ 
+             if (feats_undistort->empty() || (feats_undistort == NULL))
+@@ -1346,6 +1379,12 @@
+             }
+ 
+             euler_cur = SO3ToEuler(state_point.rot);
++            if(!extrinsic_est_en && p_imu->frontend_init_v4_initialized()) {
++              const auto field_x=kf.get_x();
++              if((field_x.offset_T_L_I-Lidar_T_wrt_IMU).norm()>1e-10 ||
++                 (field_x.offset_R_L_I.toRotationMatrix()-Lidar_R_wrt_IMU).norm()>1e-10)
++                throw std::runtime_error("fixed extrinsic state changed; refusing continued mapping");
++            }
+             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+             geoQuat.x = state_point.rot.coeffs()[0];
+             geoQuat.y = state_point.rot.coeffs()[1];
+@@ -1354,6 +1393,9 @@
+ 
+             double t_update_end = omp_get_wtime();
+ 
++            offline_handoff::event("post_lidar_update",std::llround(Measures.lidar_end_time*1e9),effct_feat_num,"derived_measuregroup_ns");
++            if(pubOdomAftMapped_->get_subscription_count()!=3)throw std::runtime_error("Odometry ingress/observer/recorder edge disconnected");
++            offline_handoff::require_two(pubLaserCloudFull_body_);
+             /******* Publish odometry *******/
+             publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+ 
+@@ -1455,6 +1497,7 @@
+     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
+ 
+     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
++    rclcpp::TimerBase::SharedPtr handoff_timer_;
+     rclcpp::TimerBase::SharedPtr timer_;
+     rclcpp::TimerBase::SharedPtr map_pub_timer_;
+     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
+@@ -1473,6 +1516,8 @@
+ 
+ int main(int argc, char** argv)
+ {
++    try { offline_handoff::start("frontend"); } catch(const std::exception& e) { std::cerr<<e.what()<<"\n"; return 2; }
++
+     rclcpp::init(argc, argv);
+ 
+     signal(SIGINT, SigHandle);

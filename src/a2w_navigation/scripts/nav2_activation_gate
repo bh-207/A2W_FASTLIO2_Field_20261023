@@ -1,0 +1,7 @@
+#!/usr/bin/python3
+
+from a2w_navigation.nav2_activation_gate import main
+
+
+if __name__ == "__main__":
+    main()

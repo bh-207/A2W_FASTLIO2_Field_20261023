@@ -1,0 +1,235 @@
+factory_map_1016 回环 v3：独立实验与证据边界
+状态：完整离线实验已完成；计算预算改善，地图一致性不通过，NOT_ACCEPTED。
+最终决策：保留实验代码和全部正/负证据，默认关闭，不切换生产配置，不发布修复地图。
+
+范围
+离线、原Bundle只读、生产配置/主install不变；不连接机器人，不发布TF或修复地图。
+1490帧关键帧只有XYZI与raw/optimized pose；不是原始LiDAR/IMU回放。
+没有独立地点/轨迹真值，不能把“提交回环数”写成“正确回环数”，误回环数保持未知。
+artifact根目录：artifacts/loop_recall_v3_20261020。
+
+一、坐标与重力审计
+FAST-LIO初始化执行g=-mean_acc/||mean_acc||*G、bg=mean_gyr；不是没有重力。
+当前分支按内部计数N>10结束初始化，没有完整的静止持续时间/方差/覆盖度质量门。
+初始姿态的重力对齐语句被注释；camera_init.Z不保证是反重力方向。
+当前Bundle、关联日志和可访问清单未找到1016的历史g、bias、逐帧外参、
+原始IMU和逐点时间；不排除未挂载或无权限位置，初始化质量目前不可追溯确认。
+N>10是初始化内部计数，不是10秒或10帧；g、bias和外参还可在滤波中更新。
+静止质量门有必要单独设计和标定，但本轮不在无实测证据下改变生产初始化行为。
+
+坐标记号：T^A_B将B坐标变换到A；O=camera_init，I=body/IMU，L=LiDAR，M=map。
+/cloud_registered_body是去畸变后的T^I_L*p_L，不是原始LiDAR点。
+/cloud_registered是T^O_I*T^I_L*p_L；cloud和odom适配器要求同stamp。
+SC读取body点，以body.XY分格，存每格max(body.z+2)，未自动重力归一化。
+Mapping source/target子图均在map系；registration返回D_map_map，
+corrected_current=D_map_map*predicted_current，
+loop_factor=inverse(corrected_current)*historical_optimized_pose。
+Localization source在body、target在map，输出T^M_I；
+correction=T^M_I*inverse(T^O_I)。不能把这两种配准输出混用。
+Quatro忽略initial_guess且粗配准估yaw；Nano-GICP、Pose3与Localization主链保留完整SE3。
+特别注意Mapping的Quatro输入已经是map子图，不是直接拿两帧body原云配准；
+SC对body姿态敏感，与Mapping子图之间实际存在多少相对roll/pitch误差，是不同问题。
+不能把合成body到body实验中较大的倾角，直接套成本次Mapping失败的实测原因。
+
+统一刚体旋转能改变“按地图Z算出的高度”，不能改变平面夹角和点间距离，
+因此不能修复区域间相对弯曲，也不应该抹掉真实坡度。
+没有可信历史g，不把全图Z或地面拟合法向冒充重力。
+原2D工具要求明确map-Z确认或up向量；旋转投影应记录独立projection frame。
+仅转PGM而不转换定位/路线/目标坐标会产生不一致，本轮未做这种修改。
+
+完整50项证据、76列原生日志语义、36项源码/二进制身份：
+artifacts/loop_recall_v3_20261020/audit/GRAVITY_FRAME_AUDIT_zh.txt
+
+二、屋顶/高度特征实验
+四种版本：原全云；body-relative z<=2m代理；局部地面参考高度<=3m代理；
+1m XY×1m高度格内最多8点的均衡检索子集。没有真实g时明确标proxy。
+1490帧全量重建描述子；原全云float32结果与Bundle描述子逐项一致。
+所有原始完整点保留用于验收；检索裁剪不改变验收点集。
+
+首次重访617..646：局部地面参考>3m代理点中位占23.96%，贡献93.57%最大高度描述子格。
+但630→21排名：全云168，body裁剪287，地面代理裁剪527；后者SC=.26327，超过原.2。
+635→18：全云177，body裁剪270，地面代理裁剪499；后者SC=.26191。
+按raw odom邻近5m代理的Top5覆盖：全云6/30、body裁剪2/30、地面裁剪0/30、均衡6/30。
+这不是有真值标签的召回率。高处确实支配描述子，但直接去掉它反而伤害当前近邻代理召回。
+因此没有把裁屋顶或均衡预处理加入最终候选；没有为追求改善继续混调高度阈值。
+38条v2回环的相邻确认帧body-relative高处网格Jaccard中位.859，10/38 raw运动不足.2m；
+两帧确认不是独立正确性证明，新增运动门也不等于独立观测证明。
+详情：roof/summary.json、roof/focused_pair_rankings.csv。
+
+三、重力归一化机制实验
+独立source/target变换完整保存；还原T_original=inverse(A_target)*T_normalized*A_source。
+缺g/不确定质量/错误frame/未来或超龄g/重复归一化/非刚体矩阵均拒绝。
+quality_valid是调用者提供的证据声明，不是工具已实测静止质量的证明。
+同一630完整body cloud、两种合成启动姿态、已知独立重力与完整SE3，
+实际调用Quatro+Nano-GICP共4次。无删点、无优化后姿态注入。
+RP归一化使Quatro种子旋转误差约.251rad降至约1.1e-6～2.1e-5rad；
+但raw和normalized最终GICP都成功，完整9566点各层覆盖1，最终GT误差均很小。
+这支持“该合成条件下RP补偿改善Quatro初值”，不支持“已解决真实首次重访”。
+人工同云测试没有遮挡变化，不是实际反向重访、IMU初始化或去畸变验收。
+两组raw/normalized耗时分别989.41/900.91ms、920.08/931.14ms，并非总是更快。
+探针没有执行线上pose-jump或SC歧义门，pipeline_accepted不等同回环入图接受。
+最终详情：registration_probe/synthetic_v2_reviewed；synthetic_v1保留为历史证据。
+
+四、38条实际约束归因
+47种图：完整38边、无回环、38单删边、7分组消融。
+用实际measurement和raw odometry重建；完整最终位姿及38提交快照与v2逐数一致。
+1170↔1214：单删1187→0，高度差.057202→.00138698m；
+旋转不变点到面.0579497→.00137660m。但1214帧当时尚未出现；
+1187时该边反而改善当时A区，不能以后验未来接缝构造在线删边oracle。
+70↔1298：单删1297→67，固定对应覆盖.586194→.682836；
+单删1315→576反而降至.451119，不能整组一刀切。
+582↔1322：删任一单边最大改善仅1.51mm；1326→587即时不利、最终有益，
+存在后续约束交互。旧2边baseline与38边图不是嵌套集合，差异不能简单全归给新增某一边。
+跨指标38条均有混合证据，整体uncertain，逐焦点单指标另列beneficial/harmful。
+未使用后验ID黑白名单，未统一降低回环权重。
+详情：attribution/report_complete/attribution_report.json。
+
+五、进入全序列的独立候选
+原SC、Quatro、GICP、LocalMap、5m/1rad、fitness/overlap、图噪声均保留。
+仅调度/确认实验：无pending时每3关键帧发起完整检索；
+pending且运动足够时立即验证，不受3帧间隔阻塞；
+相对上次计数观察达到0.5m OR 0.15rad才增加确认数；
+运动不足只等待，不提交、不刷新原观察maxgap；所有帧照常进odom图/描述子库。
+有正几何结果准备确认/提交时，仍验证全部竞争候选；
+纯失败帧保留v2已有bounded retry，不承诺每个失败帧都重算10个候选。
+未评估或异常的竞争解不能被静默排除后提交。
+默认interval=1、motion=0保持原行为；独立scheduled replay显式启用，生产YAML未切换。
+这不是屋顶优化、重力对齐或约束真值分类器；只能由全序列结果判断收益和退步。
+
+回放验收口径
+真实SC无缓存、真实配准、真实iSAM2，完整输入1490帧。
+PACE=1以原sensor间隔在steady clock实际等待，不是把旧耗时CSV重新模拟成墙钟。
+预加载Bundle在计时前完成，单列preload耗时；无ROS/DDS传输，不代表整机端到端。
+输出actual commit latency及按冻结输入到达节拍统计的pending；帧末等待数>32明确FAIL。
+另报帧初含下一active任务的保守上界；两个采样端点不证明间隙内连续队列有界。
+为保留全序列证据不会静默丢关键帧；容量超限不能宣称线上有界队列已通过。
+任何图更新失败都应终止本次回放，避免staged旧因子在下一帧未经复核继续提交。
+处理能力>0.697帧/s，目标>=0.91帧/s；分别报告process-only与包含主要输出IO的服务能力。
+主动等待后的总墙钟吞吐接近输入速率，不可当作计算余量；同时检查积压/入图延迟与地图退步。
+
+六、固定几何验收
+沿用原1026地面对、59非地面对；已参与分析，不能声称独立盲测集。
+新冻结69302条旧对应及1007095个双向完整云点实例（跨帧对可能重复，非独立样本），
+按局部地面代理分低/中/高层；
+目标、对应、法向、分层mask在变体间不重选，困难点始终保留。
+同时给全点距离、双向点到面、法向夹角及原高度指标。
+完整点距分母保留全点；点到面及法向角使用事先冻结的法向置信子集，另报有效数。
+局部地面参考/原图选择仍有偏向，不是实际地坪测量。
+freeze cache: layer_geometry/frozen/fixed_layers_v3.npz。
+
+七、完整1490帧结果
+clean legacy、v2、v3分别使用2、38、33条实际提交约束；三组均1490帧完整。
+clean/v3是真实SC检索；旧v2用了SC缓存，其检索耗时不能冒充在线SC速度。
+主要对比（提交不是独立真值；原始输入均值0.696869帧/s）：
+                               clean legacy         v2                 v3 scheduled
+实际几何配准调用数                 2                   3860               2638
+process-only处理能力(帧/s)         23.1029             0.642605           1.070584
+含主要输出IO服务能力(帧/s)         23.0390             未记录             1.070255
+首次起点候选入图帧                 1193→3              613→28             614→29
+首次起点候选sensor秒               1619.300            792.000            793.200
+617..646窗口首次入图               无                  632→18             638→15
+局部地面对高度P95(m)               .144384             .052469            .037318
+其他地面对高度P95(m)               .097614             .069341            .052958
+关键582↔1322固定对应P95(m)         .583394             .900268            .879344
+关键70↔1298固定对应覆盖率          91.64%              58.62%             49.63%
+关键1170↔1214地面高度差(m)         .015694             .057202            .018020
+
+legacy非常快是因为7157个候选event在原SC分差门前后被过滤，只有2次真正配准，
+不是同样完成大量几何验证后仍有23帧/s。不能把它与增强版当作等工作量速度比较。
+v3较v2配准数减少31.66%，process-only服务能力提高约66.6%，但各组图随提交而分歧，
+且v2使用缓存；这是完整策略结果，不能把所有耗时变化仅归因单一参数。
+v3处理均值1.070255帧/s超过目标.91帧/s，约为输入均值的1.536倍。
+完整回放墙钟2136.717s含主动按原stamp等待；预加载另计.788s。
+N/总墙钟=.697331帧/s是输入节拍，不是剩余算力。
+
+真实墙钟证据（预加载离线输入，不是ROS队列）：
+首次起点614→29：source793.200s，实际入图800.556s，延迟7.356s。
+窗口638→15：source830.300s，实际入图833.552s，延迟3.252s。
+相对legacy，首次起点source提前826.100s；并非把legacy墙钟跑得慢了826s。
+相对v2则不是更早：首次起点延后1.200s，617..646窗口提交延后12.900s；
+这是减少重复调度及增加运动间隔带来的实际折衷，不能只报告相对legacy的提前量。
+帧末延迟p50/p95/max=2.134/13.591/26.903s；
+33次入图延迟p50/p95/max=9.074/21.199/26.896s。
+帧末pending最大18；帧初含下一active的保守上界最大18，均未超过32。
+原回放summary的PASS仅指帧末容量采样，最终连续有界队列结论为NOT_ESTABLISHED；
+没有真实传输线程队列，不能据此宣布整机在线预算验收完成。
+单个有配准帧总耗时p50/p95/max=3.185/6.288/8.025s，长尾仍存在。
+
+v3各阶段总秒数/分位数详见statistics/v1/final_01：
+SC20.519；source LocalMap每帧计一次1.293；target LocalMap17.877；
+Quatro865.283；Nano-GICP336.790；对应证据97.421；Validator约.002；GTSAM1.083。
+单次Quatro p50/p95=.340/.449s；Nano-GICP=.119/.249s。
+主要耗时仍是候选几何链，尤其Quatro，不是iSAM2更新。
+2638次配准中1011次GICP不可用、143次fitness拒绝、77次overlap拒绝；
+1142次translation guard、7次rotation guard拒绝，保护未放宽。
+本机20逻辑CPU、Release -O3 -DNDEBUG；OMP_NUM_THREADS=4不等于进程只有4线程：
+实际1秒采样线程p50/p95/max=23/39/39，峰值RSS938.145MiB。
+
+八、地图一致性为什么未通过
+原1026地面对旋转不变点到面P95从.12166m降至.03650m；
+但59非地面对有40对固定对应P95恶化超过1mm（若只看严格正增量则41对），
+50对至少一个已有指标变差。点到面P95的跨帧对中位数.26201→.31552m。
+完整低/中/高层固定距离P95的跨对中位数：
+clean=1.84656/1.91214/4.84954m；v3=1.90103/1.88024/4.98142m。
+这些含覆盖不足和难匹配点，不是声称地图处处有米级定位误差；不能删掉它们美化结果。
+582↔1322中/高层点到面P95从.55034/.74574变为.89468/1.20757m。
+70↔1298部分点到面改善，却伴随固定覆盖率下降，单一平面残差不能证明对齐正确。
+A数据参考区33个非地面对中27对至少一项恶化，正常区域保护要求也未通过；
+A区不是独立水平真值，更不能据此强制共面。
+1489个原odom因子平移最大残差.000030→.018004m，
+旋转最大残差.011136→.237582度；33条loop最大残差.033186m/.232049度。
+小图残差仅表示约束被优化器满足，不证明约束的现实正确性。
+没有独立真值，误回环数量未知；首次窗口通过现有算法验证不等同现场精度已验收。
+
+九、验证、文件和复现
+隔离Release编译、70项Python诊断测试、34项LoopPipeline测试、
+17项回放测试和33项LocalizationManager测试通过；定位新增完整SE3初值传播回归。
+投影接口10项通过、1项可选PMF辅助程序测试跳过；没有声称全工作区或实机验收。
+原Bundle manifest的1498项校验全部通过；manifest SHA256：
+f6e1a5c5dc4ecbddc9f59af7303f3554ce5477ecf9aa191026ffa83bb937fbe2。
+审计快照36文件中仅3个预期实验pipeline源码改变，其余配置/前端/定位/主二进制未变；
+本轮没有改生产参数、主install、原Bundle，未连接机器人、发布TF或修复地图。
+
+主要变更位置：
+src/a2w_fastlio_mapping/include/a2w_fastlio_mapping/loop_pipeline.hpp
+src/a2w_fastlio_mapping/src/loop_pipeline.cpp、loop_revisit.cpp
+src/a2w_fastlio_mapping/test/loop_recall_replay.cpp、loop_constraint_ablation.cpp、
+registration_frame_probe.cpp及对应测试；CMakeLists.txt增加独立测试工具目标。
+src/a2w_fastlio_mapping/config/loop_revisit_v3_experiment.yaml
+（只记录scheduled实验，不被生产MappingBackend launch加载）
+scripts/diagnostics/{gravity_contract,frontend_state_audit,loop_roof_audit,
+loop_constraint_attribution,loop_layer_geometry,loop_v3_summary}.py及测试，
+run_loop_replay_experiment.sh；复用loop_recall_geometry.py。
+src/a2w_fastlio_localization/test/test_localization_manager.cpp仅增加测试。
+此前v2 mapping_backend_node.cpp等工作区改动保留，不冒充本轮全部新增。
+
+工作区根目录复现（输出必须是新目录，不允许覆盖本轮证据；无需启动ROS节点）：
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+bash scripts/diagnostics/run_loop_replay_experiment.sh \
+  artifacts/loop_recall_v3_20261020/build/loop_recall_replay \
+  maps/factory_map_1016 \
+  artifacts/loop_recall_v3_repeat_baseline legacy 0
+bash scripts/diagnostics/run_loop_replay_experiment.sh \
+  artifacts/loop_recall_v3_20261020/build/loop_recall_replay \
+  maps/factory_map_1016 \
+  artifacts/loop_recall_v3_repeat_scheduled scheduled 1
+每次.execution/保存实际命令、源码/二进制/动态库身份、资源采样和退出码。
+最终几何：geometry_final/geometry_report.json、quality_assessment.json及geometry_comparison.png；
+分层几何：layer_geometry/final/summary.json和focus_pairs_three_way.csv；
+完整统计：statistics/v1/final_01/summary.json、summary_zh.txt；
+失败、旧版本和不改善实验均保留在原目录。
+
+十、结论与下一步边界
+已证实：原SC分差过滤严重限制几何验证入口；高处代理结构主导高度格；
+FAST-LIO有重力初始化但未强制地图竖直对齐；有限调度可减少重复计算。
+尚未证实：屋顶是主要误回环原因、历史IMU初始化质量、真实厂区坡度、33条回环真假。
+本轮满足完整离线回放、首次窗口算法触发和平均处理预算，但未同时满足地图一致性，
+因此不建议启用该实验profile进行生产建图。
+下一步应先建立独立地点/非重复结构支持证据、复核高风险几何约束及真实在线队列，
+而不是继续增加回环数、盲目删屋顶、放宽现有门限或强制修平地图。
+现有证据不支持认定屋顶为唯一根因、IMU损坏或关闭外参估计必然更好。
+历史数据缺口不因本轮新增日志解析而消失。新增frontend_state_audit只解析已有
+v4/native trace，记录来源/单位/状态曲线与缺失项，不伪造真实1016重力或内部初始化N。
+native原生日志只有约6有效位，RPY由rad×57.3输出；相对scan-BEGIN标签对应scan-END状态，
+且无绝对时间锚，不能与v4精确trace同精度对齐。原生日志默认关闭，本轮未改变生产logger。

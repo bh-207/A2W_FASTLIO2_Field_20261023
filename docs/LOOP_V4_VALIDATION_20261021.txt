@@ -1,0 +1,191 @@
+factory_map_1016 v4：启动质量、测量可信度及入图延迟
+状态：前端隔离机制、固定候选、冻结图及完整1490帧回放完成；几何非退步验收未通过。
+实验根目录 artifacts/loop_v4_20261021；实验默认关闭，尚未生产验收。
+
+一、本轮新增结论
+164负责JT128驱动，驱动单位问题已修正按用户已确认前提处理。
+本机当前生产配置仍为gyro auto；本地没有能绑定修正后164驱动版本与输出单位的记录，
+因此不再根据加速度模长推断真实gyro单位，也没有再次缩放已有实机数据。
+新严格入口要求明确单位/frame/时间偏移来源；缺证据时显示unknown，不能把声明当设备验证。
+
+初始化已从“计数即通过”扩展为默认关闭的连续质量门，接在实际FAST-LIO处理路径。
+独立复核实际抓到坏输入被callback丢弃、raw时间回退被清buffer隐藏的初始化旁路；
+修正版阻止这些输入留下的好前缀提前提交，并保留RED证据。后续还实际复现复用KF
+状态不一致仍初始化、复用非空点云输出绕过等待/拒绝的缺口，增加提交前状态门及输出清空。
+
+本批后端子图没有触发200000点截断：所有v3实际配准source最大16490、target最大24068。
+四组固定候选未共享同一keyframe/body-cloud；没有packet级ledger，不能升级成原始packet独立性证明。
+raw-relative/小窗口/单帧没有稳定改善；留出中心完整扫描仍认可相近解，不能可靠拦截退步代表。
+同测量充分收敛批量LM后主要非地面损伤几乎不变；不能靠增加iSAM2迭代修好。
+相关回环的信息量控制也无稳定收益，本轮不采用该规则。
+
+主要可复用计算是同一source的FPFH。新增精确内容有界缓存，仍完整运行Quatro/GICP/所有竞争者。
+实际发现matcher墙钟随机种子与PMC显式12线程带来的非确定性，固定seed不能独自保证并行逐数复现。
+
+二、前端启动质量门（可恢复补丁，未改生产子模块）
+FAST-LIO基线16e97cdcc4260b9ba6241518a19ad8384224ba48。
+root仓库保存patches/fast_lio_v4/0001-frontend-init-quality-units.patch与新header；
+prepare按版本及唯一上下文复制到隔离源树，再patch --fuzz=0，原子模块及嵌套ikd-tree仍clean。
+最终隔离实现 isolation_v9；补丁SHA256：
+7d4f6c246aa7cde2f5d986a53a5663ed91bbcfd663eac61dad8ce7ca450b3e8c。
+
+准入：有效输入→连续样本/时长/时间覆盖与gap→gyro与acc稳定/方向稳定→整组确认→
+在副本构造g/bg及状态→原/候选状态一致性硬检查→提交KF/P及解除初始化。
+运动、异常或回退重新累计；同组后坏样本可撤销ready，不把运动均值当gyro bias。
+不强制机体水平，不标定新加速度计bias；IMU-only稳定性不能排除恒定线加速度。
+阈值配置化，但当前值仅经受控合成输入验证，尚未按164真实振动/温漂验收。
+严格入口显式rad/s或deg/s、m/s²或g，SI输入比例1；明确g/deg才转换，禁止第二次入口转换。
+ROS IMU本身没有单位元数据，错误声明仍需驱动代码/配置证据排除，不能靠数值自动认证。
+固定偏移delta=t_IMU_raw-t_LiDAR，t_IMU_aligned=t_IMU_raw-delta，原采样stamp另存，应用一次。
+网络接收延迟没有写入固定偏移，也没有替换采样时间。
+记录精确窗口成员/时间范围/均值/方差/实际g,bg,ba,姿态,外参，以及完整生效参数/来源旁车。
+状态门在SO3候选构造前检查原始外参、状态finite/正规旋转、原/候选P正定和噪声方差；
+按实际prediction域R*(a*9.81/|mean_acc|-ba)+g核验mean/last残差。模板门限.05/.25m/s²，
+尚未164实测；fresh静止实际残差约.001m/s²，保留ba反例约1m/s²、last脉冲约.499m/s²被拒绝。
+不自动清零ba或rot、不修补非法P；复用非identity KF显式拒绝并要求一致状态重启，不误称支持任意
+已有世界系的原地重置。初始化等待/拒绝/提交帧均清输出云，避免Reset复用旧点云绕过mapping门。
+18类非法状态、3类sentinel输出反例均不修改实际KF/P；gate-off兼容旧路径。
+
+实际机制：倾斜静止220成员、1.095s后初始化；先运动0.8s后重累积相同窗口。
+持续运动、末组运动/NaN/负stamp/缓存内正时间回退均不初始化。
+gate关闭的运动首组初始化作为旧路径风险负对照保留。
+冻结synthetic raw IMU+ring+逐点时间经过实际Hesai Preprocess、ESKF及去畸变，19帧有效deskew；
+没有运行激光测量地图更新、ROS传输或真实机器人，不能称端到端建图/实机通过。
+25项单测、9组真实处理路径场景、27组状态门场景通过，完整隔离节点编译成功。
+原v8实际RED21反例、首轮阈值测试夹具26/27失败结果完整保留，没有改算法参数去获得GREEN。
+倾斜静止/先运动后静止/frozen raw三成功场景actual_states与v8逐字节相同，9组result JSON SHA一致。
+最终证据 frontend/final_evidence_v4.json、RESULT_v4_zh.txt、mechanism_v6/suite.json、state_GREEN_v2/。
+入口及命令 docs/FRONTEND_INIT_V4_GUIDE.md。
+
+三、LI-Init独立入口
+已按官方README/结果和时间处理代码核对。上游为ROS1/catkin/Ceres体系，JT128的ROS2
+PointCloud2字段、逐点时间、IMU单位/轴以及时间域需适配，不能直接嵌入每次启动。
+设备联合标定要求充分激励；日常启动复用已验证配置并建立本次g/bg。
+提供external-plan/import/review及实验配置导出；只导入最后完整Refinement的T_I_L与总时间偏移，
+检查正规旋转、方向/单位/时间符号及证据字段。未验证结果拒绝自动导入生产；新开关仍false。
+上游算法NOT_RUN：本机无ROS1命令，本次禁止ROS发布，1016缺raw和已审核激励数据。
+结构审核/调用者签认不等于物理标定认证；不导入任意世界g/bias，不宣称已修复原图。
+
+四、重力和坐标约定
+延用v3：O=camera_init，I=body/IMU，L=LiDAR；T^A_B把B点变到A。
+初始化g在O表达、bg在I表达，外参T^I_L保持配置。新gate不改变R^O_I来强行竖直，
+也不只把g改成世界负Z；实际记录使将来可单独验证可信的导出对齐变换。
+Mapping source/target均在map，求D_map_map；corrected_current=D*predicted_current，
+factor=inverse(corrected_current)*historical_optimized_pose；不是Localization的body→map输出。
+本轮没有新增屋顶/重力归一化、没有旋转原点云/地图/PGM/路线，没有混用不同SC缓存版本。
+1016的历史g/IMU/逐点时间仍缺失，不能验证当时初始化与去畸变或认定真实地坪坡度。
+
+五、固定子地图与留出实验
+在当前帧加入前的图状态重放实际v3约束，冻结预测与全部历史pose；未用本次提交后的结果作初值。
+代表614→29、638→15、1292→61、1321→582；物理同地点/非重复结构标签均unknown。
+四组source/target窗口至少相隔745s；shared keyframe cloud ID=0，不含未来帧。
+optimized窗口、raw-anchor窗口、±2窗口、单帧共32次full/fine；另8次同坐标优化锚控制及4次
+排除两中心完整扫描后的full，共44次真实注册；完整评价点不删高处或困难结构。
+同坐标optimized-anchor与raw-anchor结果差约0.058/1.109/0.396/2.363mm，没有稳定raw优势。
+两处晚期子图内部optimized/raw相对位姿差约11–12mm，不是米级刚体形变证据。
+单帧614 full失败、638 overlap=.321低于原.35，不能把缩小窗口当无代价修复。
+生产±5四组fine-only约89–130ms，full约287–411ms，结果接近；尚不足以验证大初误差/竞争解，未推广。
+留出中心后四组仍过原几何+pose门：1321→582固定p95从full .520/.467m变为.562/.511m，
+未纠偏prediction为.453/.416m；留出验证本身没有可靠区分“正常/恶化”。
+该holdout未参与求解但邻扫高度相关，2m共同支持也只是冻结可见性代理，不是物理独立真值。
+双向全点、固定法向子集、多对一集中、空间格分布、低中高层及共同支持分母全部保留。
+详细docs/LOOP_SUBMAP_V4.txt；submaps/holdout_three_way_geometry.csv含192行可比结构指标。
+
+六、冻结图求解和不确定性
+原2/38/33条actual loop分别重建，原raw odom/先验/噪声保持一致，iSAM最终pose逐数复现。
+原BetweenFactor近似Jacobian的LM停止不足以证明收敛；诊断实现精确Local链Jacobian，
+保持同测量、同noise、同实际GTSAM目标，warm/raw两起点充分局部收敛，数值梯度<1e-6。
+v3 cost 1.483496→1.478649，warm/raw只需3/6次，最大pose变化约2.7–3.0cm。
+582↔1322固定P95：原2边clean .583394m，v3 iSAM .879344，充分LM .879308；
+70↔1298覆盖：clean91.64%，v3 iSAM49.63%，充分LM49.66%。主要损伤仍在。
+每边保存Rot(rad)前三、Trans(m)后三的原/白化残差、实际IRLS权重、API权重、实际cost。
+本机GTSAM的weight/cost API与常用手算公式存在差异，已保留版本和独立数值证据；
+但本批最终loop白化范数均<1、Huber实际权重全1，该差异不能解释主要损伤。
+小因子残差不证明结构真实一致；odom残差增长没有单独作为地图损坏判据。
+
+独立信息量规则只用已提交过去target扫描Jaccard：sigma乘sqrt(1+历史重叠和)，
+16边变化、17边不变、最大2.093，非统一降权/ID黑名单；两起点充分收敛。
+582改善仅.112mm，70覆盖反降.112百分点，A区23/33对P95变坏；NOT_PROMOTED，未再调规则。
+它是相关性代理，不是测得的covariance。详细docs/LOOP_GRAPH_V4.txt。
+
+七、FPFH缓存与随机性
+新增Quatro prepared-input接口复用原matcher/solver；默认align保持原转换顺序和同一个FPFH对象。
+QuatroRegistration容量0默认关闭；实验16项LRU，按有序完整XYZI实际内容指纹+逐字节快照核验。
+adapter特征参数不可变；优化pose变化体现在输入坐标，预处理变化应使用新实例；没有复用旧LocalMap。
+缓存只复用特征，不复用候选决定、配准结果或图因子；竞争者验证和全部原门限保留。
+真实17对共54936783个bin与旧单FPFH程序/重复prepare逐字节相同。
+固定seed1729000000、线程上限4正序17/17数值等价，总wall约11.534→10.708s。
+反序仍有1对数值差异，即便判定一致也没有放宽严格容差，全部失败保留。
+额外seed1792531200无显式线程上限14/17等价、上限1则17/17；不能用单seed证明并行确定性。
+异常0hit/2miss调用没有旧缓存复用，独立特征完全同，支持下游并行择优非确定性解释但不当独立真值。
+原matcher使用srand(time(NULL))，PMC源码显式12线程；OMP_NUM_THREADS4不会限制整个链。
+离线time() shim仅用于成对审计，steady clock保持真实，不注入生产算法；完整回放不加载shim。
+cache_benchmark_summary.csv保留每轮具体收益、退步及数值门结论，不能只挑最好耗时。
+
+八、完整回放与验收
+cached_full_paced完整结束，exit=0：1490帧真实SC/Quatro/GICP/iSAM2，原节拍实际等待；
+v3间隔检索/运动间隔确认、子图/配准/图noise不变，实验缓存16与OMP线程上限4。
+新增有界输入ID队列由独立producer按原stamp到达，每次push/pop记录，容量32，超限失败留证。
+预加载存档不是ROS/DDS真实传输；即使连续离线队列通过，也不能替代整机ROS在线验收。
+每ID恰一次：1490 arrival+1490 dequeue，共2980次实际mutation；逐次FIFO、waiting、due、
+start/commit/end独立核对一致。峰值14/32，无溢出；总等待积分3322.605890319 frame-s，
+精确等于逐帧dequeue-arrival之和。Q>=1最长连续99.544803s，Q>=2最长70.638793s，
+不能以最终清空队列声称全程没有积压。v3没有mutation证据，不能补造其连续峰/积分/段长。
+
+同口径v3→v4：
+active服务（含primary IO）1.070255→1.136339帧/s，约+6.17%，超过.91实验目标；
+真实paced墙钟2136.716949→2136.713871s，受原输入节拍限制，实际输入/出队约.696869帧/s。
+入图延迟p50/p95/p99/max：9.074/21.199/26.374/26.896s → 5.430/15.143/18.989/20.393s。
+首次origin 614→29延迟7.356078→7.649436s，反而慢.293358s；638→15窗口也慢约.156s。
+峰值采样RSS938.145→1025.105MiB，增加86.961MiB；线程峰39→24，不是进程仅4线程。
+缓存3085 hit/2325 miss，最终16项；完整入图31约束（v3为33），不是以数量为目标。
+本次未固定Quatro墙钟seed；缓存及OMP资源约束一起变化，不能把全部差异单独归因缓存。
+全程binary/算法lib/关键源码冻结SHA前后通过，ldd确认隔离common lib，未混载旧主install。
+
+相同冻结1026地面对、59非地面对与fixed_layers_v3.npz，未重建对应、未删困难点：
+地面点到面RMS P95（clean/v3/v4）.121662/.036500/.049032m；
+地面法向P95 .898939/.873515/1.011385度，v4并非比v3全面改善。
+非地面固定P95恶化>1mm（v3/v4）40/38对；点到面P95恶化>1mm为36/38对。
+旧4指标至少一项退步仍为50/59；正常A参考区仍27/33。v4最坏574↔1314固定P95
+增加.393452m、点到面P95增加.485283m；没有因总体中位数好看而隐藏逐对退步。
+完整低/中/高结构、2832方向行、5304配对变化均保留；物理真值/非重复结构标签仍unknown。
+几何非退步验收NOT_ACCEPTED，不更新生产开关/主install，不生成修复Map Bundle。
+详细statistics/README.txt、pace_queue_audit.json、final_geometry/summary.json及LOOP_SUBMAP_V4.txt。
+
+九、变更与保护
+新增前端补丁、独立构建/机制测试、LI-Init结果审核工具；生产FAST-LIO子模块不改。
+公共Quatro adapter/第三方prepared API及测试、独立实验config、replay队列和取证工具；
+独立graph/submap诊断目标与测试；生产optimizer/registration阈值/MapBundle格式不改。
+隔离公共库及其依赖二进制应配套使用；本轮未更新主install，不能混用新库启动旧节点。
+原Bundle1498项manifest校验全部通过，manifest SHA仍为
+f6e1a5c5dc4ecbddc9f59af7303f3554ce5477ecf9aa191026ffa83bb937fbe2；
+主MappingBackend二进制SHA仍91d08b229ef957d5cc4428d4ff46265e5d3cc223f2cf706fe703dd6ec9ec749d。
+36文件旧审计仅4项预期改变：3项此前v3 pipeline工作+本轮Quatro adapter；其余前端、
+生产配置、定位及主二进制未变。原FAST_LIO_Hesai及嵌套子模块clean，未连接机器人。
+新增启动脚本库加载硬门，cached模式强制隔离common优先且ldd结果必须匹配；原前缀优先
+的真实ldd负例拒绝、隔离优先正例通过，所有DSO含LD_PRELOAD记录SHA。完整回放在此
+脚本改动前已明确使用正确LD并通过冻结检查；新脚本不冒充已重做一遍1490帧回放。
+新增/重点复跑：4缓存、21 replay、4实际queue、9冻结graph、8 submap、40 Python诊断通过。
+独立代码审查发现并回归修复required库无箭头LD_PRELOAD误拒；错误前缀/重复/符号链接越界仍拒绝。
+库身份是启动快照，不是运行中所有dlopen或检查后文件变化的安全证明。
+
+十、交付结论与仍需实测
+真正新增：启动样本准入与状态提交保护、单位/时间唯一入口和溯源、实际连续队列取证、
+精确内容FPFH缓存；排除了本批点数截断和iSAM2未充分收敛作为主要非地面退步解释。
+raw-relative、小窗、留出中心及相关信息量代理均未证明稳定修复，未推广；fine-only未入完整回放。
+当前证据仍不能在未知物理标签下可靠区分地点误认、亚稳态配准偏差与真实结构差异。
+因此不扩大回环数量、不凭小因子残差确认精度，不发布修复地图，不切换生产默认。
+待实测：164修正驱动的版本化单位/轴/stamp契约与振动温漂窗口、真实启动/原始逐点时间去畸变、
+充分激励LI-Init重复标定及跨上电offset稳定性、独立同地点非重复结构标签、真实ROS连续入队与延迟。
+缺factory_map_1016原始IMU和逐点时间，不能用本轮合成机制证明原图倾斜根因或IMU故障。
+
+十一、补丁的可携带交付
+delivery/frontend_v4_source.tar.gz（34330字节）包含自包含0001补丁、prepare/build工具、
+实际harness、27状态测试入口及指南；不含已编译库、地图或设备凭据。
+delivery/frontend_v4_synthetic_fixture.tar.gz（14052976字节）单独保存33个冻结合成输入文件。
+两归档成员内容与当前源文件逐项SHA一致，archives.sha256及validation.json已写入。
+从根仓库工作区解压后prepare/build只依赖所列干净FAST-LIO/ikd-Tree及Ubuntu/Humble系统依赖，
+不读取旧artifacts私有输入或二进制；27状态测试不需夹具，9机制场景需额外的合成夹具归档。
+未声称旧远端Git clone已包含本轮未提交文件，未声称在全新机器重编过归档；本轮没有提交/推送。
+完整原模拟器不在最小包中，不能仅克隆旧代码就重生成历史输入；可复用的冻结输入已独立交付。
+具体命令见delivery/README.txt，禁止将补丁直接打到正在运行的生产子模块。

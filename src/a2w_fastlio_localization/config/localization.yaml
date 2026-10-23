@@ -1,0 +1,20 @@
+/**:
+  ros__parameters:
+    # Offline-safe defaults. Final thresholds require JT128 hardware validation.
+    # Lightweight dispatch timer; registration runs on the single background worker.
+    match_interval_ms: 200
+    normal_match:
+      translation_threshold_m: 0.5
+      rotation_threshold_deg: 5.0
+      # Leave headroom before the 3 s accepted-correction health deadline.
+      maximum_elapsed_ms: 2000
+    # Normal updates are bounded at the scan and current robot positions.
+    # Larger recovery corrections are admitted only while navigation is LOST.
+    maximum_correction_translation_jump_m: 0.5
+    maximum_correction_rotation_jump_rad: 0.17453292519943295
+    maximum_match_result_age_ms: 3000
+    input_timeout_ms: 1000
+    max_path_poses: 10000
+    owner_id: "localization_backend"
+    owner_conflict_window_ms: 1000
+    owner_heartbeat_ms: 250

@@ -1,0 +1,90 @@
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+
+#include "a2w_fastlio_common/local_map_builder.hpp"
+#include "a2w_fastlio_common/registration_pipeline.hpp"
+#include "a2w_fastlio_localization/local_map_selector.hpp"
+
+namespace a2w_fastlio_localization
+{
+
+enum class MapMatchingMode : std::uint8_t
+{
+  kFull = 0U,
+  kFineOnly = 1U,
+};
+
+struct MapMatchTimings
+{
+  double submap_ms{0.0};
+  double coarse_ms{0.0};
+  double fine_ms{0.0};
+  double evidence_ms{0.0};
+  double validation_ms{0.0};
+  double total_ms{0.0};
+  bool target_cache_hit{false};
+};
+
+struct MapMatchResult
+{
+  bool success{false};
+  std::string reason;
+  std::uint64_t candidate_id{0U};
+  std::size_t source_points{0U};
+  std::size_t target_points{0U};
+  // Retained only until the asynchronous result callback so diagnostics can
+  // freeze the exact target used by the solver without rebuilding it.
+  a2w_fastlio_common::CloudConstPtr target_cloud{};
+  a2w_fastlio_common::Pose3d map_body{};
+  a2w_fastlio_common::RegistrationResult registration{};
+  MapMatchTimings timings{};
+};
+
+struct MapMatchComparison
+{
+  MapMatchResult fine_only;
+  MapMatchResult full;
+  double fine_only_latency_ms{0.0};
+  double full_latency_ms{0.0};
+};
+
+class MapMatcher
+{
+public:
+  MapMatcher(
+    a2w_fastlio_map::MapSnapshot snapshot,
+    std::shared_ptr<a2w_fastlio_common::RegistrationPipeline> registration,
+    a2w_fastlio_common::LocalMapConfig local_map_config);
+  MapMatchResult match(
+    const a2w_fastlio_common::FrontendFrame & frame,
+    const SelectionResult & selection,
+    MapMatchingMode mode) const;
+  // Diagnostic only: build one target and evaluate sequentially. Neither result
+  // updates a LocalizationManager or a LocalizationMonitor.
+  MapMatchComparison compareModes(
+    const a2w_fastlio_common::FrontendFrame & frame,
+    const SelectionResult & selection) const;
+
+private:
+  a2w_fastlio_common::CloudConstPtr targetFor(
+    const std::vector<std::uint64_t> & ids, bool & cache_hit) const;
+  MapMatchResult matchPrepared(
+    const a2w_fastlio_common::FrontendFrame & frame,
+    const SelectionResult & selection,
+    const a2w_fastlio_common::CloudConstPtr & target,
+    MapMatchingMode mode) const;
+  class Provider;
+  std::shared_ptr<Provider> provider_;
+  std::shared_ptr<a2w_fastlio_common::RegistrationPipeline> registration_;
+  a2w_fastlio_common::LocalMapBuilder local_map_builder_;
+  // Read-only bundle: one bounded target entry is enough for repeated tracking.
+  mutable std::mutex target_mutex_;
+  mutable std::vector<std::uint64_t> cached_ids_;
+  mutable a2w_fastlio_common::CloudConstPtr cached_target_;
+};
+
+}  // namespace a2w_fastlio_localization

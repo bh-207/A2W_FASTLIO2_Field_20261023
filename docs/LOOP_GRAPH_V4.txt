@@ -1,0 +1,297 @@
+LOOP GRAPH V4 — offline fixed-measurement audit, 2026-10-21
+
+Predeclared independent correlation-budget-v1 experiment (before evaluation)
+Rule fixed by the user: process the 33 v3 actual committed loop measurements in
+their original strictly increasing source IDs. For each new loop, compute its
+original target support-ID window (before5/after5, clipped at source time).
+Sum its Jaccard overlap with EACH already-committed past loop target window.
+Apply sigma_multiplier=sqrt(1+sum_jaccard) to BOTH rotation and translation sigmas
+of this new loop only. No overlap gives exactly1. Prior/odometry noise, loop
+measurements and all graph factor directions stay unchanged. There is no ID
+blacklist, future geometry/quality oracle, blanket downweight or further tuning.
+The weights are computed causally from support IDs; the fixed-graph batch solve
+is still post-hoc/offline and is NOT an online replay or true covariance model.
+Results must be new graph/correlation_budget_v1 output, not overwrite baseline.
+No production promotion is implied, even if some proxy metrics improve.
+
+correlation-budget-v1 result — NOT_PROMOTED; rule is not retuned
+33 actual v3 loop measurements retained. 16 edges have past target overlap and
+receive sigma>1; 17 remain at exactly original noise. Maximum multiplier is
+2.0930107061331373. Sum of per-edge nominal diagonal information multipliers is
+26.954791628348762 vs33 original; this is NOT an effective independent sample
+count. The counter files contain all33 edges and528 past-only overlap terms.
+An independent Python set-based recalculation checked every term/counter/sigma.
+Prior/odom measurements and sigmas remain original. The original same-noise audit
+directories are untouched, and its exact binary is preserved as
+graph/loop_graph_quality_unscaled_audit_v1 (SHA2566cabde36e760560a269805538533d5a4f41a5d61b1b839e556691af99dcd4d21).
+Opt-in CLI adds only trailing argument correlation-budget-v1; omitted means
+original per-loop noise. No Mapping/common/replay/production configuration change.
+
+Numerical convergence under the NEW scaled objective (do not compare cost values
+directly with old unscaled objective):
+  warm:1.475611164626262 ->1.4648566197312702,4iterations;
+       linearization gradient inf2.10e-7, actual numerical gradient inf2.27e-7.
+  raw:66.259679725767228 ->1.464856619729729,6iterations;
+      linearization gradient inf4.00e-7, actual numerical gradient inf4.08e-7.
+  Warm/raw max position difference0.00012845m. All final actual Huber IRLS weights
+  still equal1 (max Gaussian loop norm.332943). This is numerically stable at the
+  documented tolerance; geometric effects are mixed, not consistently improved.
+
+Warm unscaled sufficiently-converged LM -> budget LM, SAME33 measured loops:
+  582<->1322 fixed P95 .879308203 ->.879195770m (only0.112mm improvement;
+    original clean .583394266m, major old damage persists).
+  70<->1298 fixed coverage .496641791 ->.495522388 (0.11194 percentage-point
+    degradation; clean .916417910). Fixed P95 .775089967 ->.775430431m.
+  1170<->1214 ground height .017683192 ->.016744300m improves0.939mm,
+    but fixed non-ground P95 .317617708 ->.318865047m worsens1.247mm.
+  Local heldout ground-heightP95 .037518094 ->.037122964m improves0.395mm,
+    outside heldout .053037585 ->.053434806m worsens0.397mm. Their maxima and
+    each fixed pair are retained, not hidden behind the improved local P95.
+  A-reference fixed seam P95 median .612551391 ->.615123179m. 23/33 A pairs
+    worsen P95; worst1210<->1422 .503312433 ->.513320491m (+10.008mm).
+    A fixed-P50 median .234148718 ->.237449409m; A ground-heightP95 improves
+    .037356419 ->.036971312m but normal-angle maximum increases slightly.
+  Across59 non-ground pairs,40 fixedP95/33 fixedP50/14 fixedcoverage worsen.
+    49 pairs worsen at least one reported metric. Across1026 ground pairs,
+    481 heights and448 normal-angle metrics worsen at tolerance1e-10; many
+    changes are tiny, so counts alone are not evidence of material degradation.
+  Full fixed-cloud median P95 2.209193140 ->2.212411759m; high-proxy coverage
+    median .571428571 ->.570548096, high-proxy point-plane P95 median
+    .483899743 ->.485130658m. Frozen1026/59/1007095-point selections unchanged.
+Thus this single causal proxy rule does not repair the original heldout damage
+and introduces additional small A-region/seam regressions. Do not promote it to
+the mainline or claim true covariance, independent observations or absolute error.
+No second rule/threshold/weight search was performed. It is an offline fixed-graph
+counterfactual: later measured edges are held fixed, not re-registered as they
+would be in an actual online weighted trajectory.
+Artifacts are correlation_budget_v1/{correlation_budget_rule.json,
+correlation_budget_edges.csv,correlation_budget_terms.csv,solutions.csv,
+*_factors.csv,geometry_warm,geometry_raw,layers,assessment.json}.
+9/9 graph tests pass, including observed RED for causal prefix invariance,
+nonoverlap identity, only-loop-sigma scaling and opt-in CLI counters. No compilation
+or heavy geometry continues after the cached1490-frame paced run is released.
+
+Outcome
+Same-factor batch LM with independently verified small actual-objective gradients
+does NOT remove the substantial fixed-correspondence damage seen in v2/v3.
+This rules out insufficient iSAM2 iterations as the sole explanation for these
+particular heldout seams, not every possible optimizer/backend problem. It is
+evidence of mismatch between the frozen measurements/model and heldout geometry,
+not absolute ground-truth proof of any individual false loop. Quality remains
+NOT_ACCEPTED; no Bundle/map is produced or published.
+
+Scope and approved brief
+Compare the production iSAM2 saved solution with batch LM on exactly the same
+original raw-odometry prior/between factors, actual measured loops, diagonal
+sigmas and robust block kernel. No online candidate filtering, new measurements,
+uniform reweighting, ID blacklist, production optimizer change or Bundle output.
+The user explicitly requested independent execution without another approval gate.
+
+Implementation plan / TDD
+1. Unit tests first: six-component Rot(rad)-then-Trans(m) residual/whitening,
+   independently derived Huber/Cauchy weights and actual nonlinear factor cost;
+   tiny inconsistent graph LM cost reduction and convergence; shared scan support
+   overlap; immutable-input/output protections. Observe RED before implementation.
+2. Add standalone loop_graph_quality.cpp and test_loop_graph_quality.cpp.
+   Reuse ablation CSV/pose/config readers, not alternative odometry generation.
+   Root integrates CMake targets; no production optimizer/CMake edits here.
+3. Rebuild the frozen graph. Export every prior/odom/loop factor residual vector,
+   unweighted Gaussian-whitened vector, robust weight, effective-whitened vector,
+   nonlinear factor cost and Gaussian reference cost. Audit sums against graph.error.
+4. Run LM from saved iSAM poses and raw poses, record every iteration's objective,
+   gradient norm, step, lambda, iterations and explicit stopping rule. Never label
+   an iteration/cost-only cap as proven convergence. Preserve original factor sets.
+5. Apply unchanged 1026/59 geometry evaluator to saved iSAM vs each batch result.
+   Frozen layer metrics are run using the corresponding independent frozen tool.
+6. Export pairwise submap-support overlap and raw source-motion proxies for loop
+   dependence; these are not covariance measurements or an independence oracle.
+7. Report numerical convergence separately from geometry consistency and ground
+   truth. No independent absolute/horizontal truth exists; odom residual increases
+   alone do not establish a bad map. No map/Bundle is published.
+
+Review focus
+- BetweenFactor local chart must agree with explicit SE3 Log; expose disagreement.
+- Whitening precedes block robust weight; IRLS surrogate is not actual robust cost.
+- All factor directions/noises and prior gauge match production exactly.
+- An LM stall with a large gradient is not sufficient convergence.
+- Shared local-map frame IDs are only a correlation proxy, not true covariance.
+
+Build and execution
+Targets (root owns CMake integration): loop_graph_quality and
+test_loop_graph_quality. Dependencies: pose_graph_optimizer, yaml-cpp, gtsam;
+ament a2w_fastlio_common. The test includes the standalone implementation with
+LOOP_GRAPH_QUALITY_NO_MAIN. No install target or production optimizer is changed.
+The original ablation CSV/pose/config readers are reused by including its
+implementation with LOOP_CONSTRAINT_ABLATION_NO_MAIN.
+
+CLI:
+  loop_graph_quality BUNDLE ACTUAL_LOOP_CSV SAVED_ISAM_POSES NEW_OUTPUT_DIR
+Inputs are protected against output overlap (including symlinks), outputs must
+be new, and every loaded index/config/loop/pose file is compared byte-for-byte
+again after the run. Geometry validation separately checks all 1498 original
+manifest files and confirms the unchanged original 1026/59 evidence selection.
+All 1490 original raw odometry poses and 1489 original odometry measurements are
+retained. The prior is the original first raw pose, not a horizontal/gravity
+prior. Rawstart batch is explicitly offline/future-derived, never online replay.
+
+Data sets:
+  clean: artifacts/loop_recall_v3_20261020/baseline_live_full_clean (2 loops)
+  v2:    artifacts/loop_recall_20261020/enhanced_v2_full (38 loops)
+  v3:    artifacts/loop_recall_v3_20261020/scheduled_live_full_paced (33 loops)
+Output root: artifacts/loop_v4_20261021/graph
+  {clean,v2,v3}/             original fast-Jacobian LM diagnostic, NOT the final
+                            sufficiently converged comparison for v2/v3
+  {clean,v2,v3}_exact/       authoritative same-cost exact-Jacobian batch runs
+  geometry_{clean,v2,v3}_{warm,raw}/  unchanged original 1026/59 evaluator
+  layers/                   nine trajectories through the SAME frozen layer cache
+  gtsam_and_binary_identity{,_exact}.sha256: headers/library/binary identities
+  test_loop_graph_quality_exact.log: final standalone unit/integration verification
+
+Numerical audit: residuals, noise, weights and costs
+Each *_factors.csv records explicit SE3 Log AND factor.unwhitenedError() six
+vectors. Order is rotation xyz in radians, then translation xyz in metres. It
+also records factor.unweightedWhitenedError() (underlying Gaussian whitening),
+factor.whitenedError() (noise whitening including robust IRLS reweight), their
+norm-ratio actual IRLS block weight, factor.weight(values), factor.error(values),
+canonical rho(Gaussian-whitened norm), Gaussian reference cost and IRLS quadratic
+surrogate. Factor cost sums are checked against graph.error(values).
+The actual native residual and explicit SE3 Log agree to floating precision
+(installed GTSAM_POSE3_EXPMAP is enabled). This convention is never radians/degrees
+or rotational/translational sigma mixed into a single unwhitened threshold.
+
+Original unchanged sigmas:
+  prior rotation 0.001 rad; prior translation 0.001 m
+  odom rotation 0.05 rad; odom translation 0.1 m
+  loop rotation 0.05 rad; loop translation 0.1 m
+  original robust kernel Huber, block norm, k=1 whitened units
+These are configured model sigmas, not empirically calibrated covariance truth.
+Each loop has the same diagonal sigmas as one odometry factor; this says nothing
+by itself about independence or whether the sigma is well calibrated.
+
+Important installed GTSAM 4.1.1 API characterization (production library unchanged):
+  Fixture native Log = [0.1,0,0,0,0.4,0], Gaussian whitening = [2,0,0,0,4,0].
+  Huber actual WhitenSystem IRLS weight = 1/sqrt(20) = 0.22360679775.
+  factor.weight(values) instead returns 1 because its robust.weight sees the
+  native residual norm, not the underlying Gaussian-whitened norm.
+  factor.error = sqrt(sqrt(20))-0.5 = 1.6147425268811286;
+  canonical Huber rho(sqrt(20)) = sqrt(20)-0.5 = 3.97213595499958.
+  Separate Cauchy fixture native translation .2m (Gaussian norm2) gives actual
+  IRLS weight .2; factor.weight = 1/1.04 = .9615384615384615;
+  factor.error = .5*ln(1.8) = .29389333245105947;
+  canonical Cauchy rho(2) = .5*ln(5) = .8047189562170501.
+  The installed Robust inherits Base::squaredMahalanobisDistance, which calls
+  robust whiten(v) (already IRLS weighted); Robust::loss then applies rho to that
+  norm. Thus graph.error and the canonical IRLS objective are not generally the
+  same nonlinear function outside the quadratic regime. The tool does NOT replace
+  this cost or modify GTSAM. It reports both, and checks actual cost derivatives.
+  This is why factor.weight API is NOT labelled the actual linearization weight.
+  The installed header and shared-library hashes are preserved in graph/.
+  Primary reference supporting this code path:
+  https://raw.githubusercontent.com/borglab/gtsam/4.1.1/gtsam/linear/NoiseModel.cpp
+  (Base::squaredMahalanobisDistance and Robust::WhitenSystem), plus local
+  /usr/include/gtsam/linear/NoiseModel.h Robust::loss/weight and tested library APIs.
+
+Crucially: EVERY final loop in clean/v2/v3 iSAM AND final batch has actual Huber
+IRLS weight 1. Max final warm Gaussian-whitened loop norm:
+  clean 0.00369091; v2 0.14166259; v3 0.33311106 (all below k=1).
+Therefore the outside-quadratic API behavior is NOT activated at these final
+solutions and must NOT be offered as the cause of their main map damage. It can
+affect rawstart acceptance steps; both raw/warm starts reached matching-cost,
+small independently checked actual-objective gradients in this experiment.
+
+Why exact batch Jacobians are used
+The installed BetweenFactor default fast path returns Between Jacobians without
+multiplying by the Local-chart derivative. Its own header has the alternative
+GTSAM_SLOW_BUT_CORRECT_BETWEENFACTOR path. The first standard-Jacobian runs stopped
+with IRLS linearization gradient <1e-6, but numerical actual-cost gradient was
+0.00683 (v2) / 0.00770 (v3). Those are explicitly NOT_CONVERGED artifacts.
+The standalone ExactBetweenFactor subclasses the SAME GTSAM BetweenFactor and
+restores only that Local-chain derivative. Measurements, residual, noise, robust
+cost and factor directions remain identical. No global compile macro or library
+ABI is changed, and original production iSAM still uses its unchanged code.
+A dedicated RED->GREEN test verifies the same residual and all six Jacobian
+columns against central differences at a nonzero SE3 error. Frozen iSAM replay
+with the original backend matches every supplied original pose exactly (max
+translation0, rotation about4e-18rad); this verifies the original factor/noise setup.
+
+Convergence evidence (actual GTSAM objective, lower only comparable WITHIN row)
+Dataset  Init       initial error     final error       iter  numerical grad inf
+clean    iSAM warm  0.0007387917981    0.0007385442019       1   3.32e-8
+clean    raw        6.26584911175      0.0007385421307       5   5.00e-8
+v2       iSAM warm  0.710527916459     0.704249977414        4   4.33e-7
+v2       raw        87.3601283442     0.704249977583        5   6.22e-7
+v3       iSAM warm  1.48349577854      1.47864881762         3   7.33e-7
+v3       raw        73.0498423596     1.47864881707         6   3.90e-7
+Each iteration trace includes objective, linearization gradient L2/inf, actual
+step norm, lambda and relative drop. Max1000/lambda cap1e16 are only safeguards;
+no case stopped on those caps. A linearization gradient<1e-6 (or stall with<1e-4)
+must ALSO have independent central-difference actual-objective gradient<1e-4.
+Every Pose3 dimension is checked with retract +/-1e-6, summing only incident
+factor costs; this is exactly the full graph objective derivative.
+Warmstart max pose displacement vs original iSAM: clean0.000679m, v2 0.063262m,
+v3 0.026708m. Warm/raw near-flat-mode max pose differences: clean0.008342m,
+v2 0.000571m, v3 0.003485m, despite tiny objective differences. These fixed
+tolerances establish local numerical stationarity, not unique/global optimality.
+Do not rank clean/v2/v3 using total objective: their loop factor sets differ.
+
+Same frozen geometry: sufficiently converged batch does not remove key damage
+Metric                            clean iSAM   v2 iSAM   v2 LMwarm  v3 iSAM   v3 LMwarm
+582<->1322 fixed-match P95(m)       .583394      .900268   .900267    .879344   .879308
+70<->1298 fixed coverage(<.5m)      .916418      .586194   .586567    .496269   .496642
+1170<->1214 ground plane RMS(m)    .015674      .057950   .057628    .018069   .017735
+Local heldout plane-height P95(m)  .144384      .052469   .052296    .037318   .037518
+The original 59-pair/69302-directed-match digest is still
+22c7d615d64df3a8e65db03cc84a9930883bdf1f0e832049148095178fb59c3a.
+Layer cache digest is still
+a74efd641c1abed1f05dd76b28f85bbb30c5b17506e94f4225b043ab4b898eea.
+It contains the same 1007095 directed full-cloud point correspondences, split by
+the ORIGINAL reliable local-ground proxy height (not independently known roof/
+floor semantics). No trajectory-dependent cropping, far-point dropping, match
+reassignment or outlier removal was used for fixed-correspondence comparisons.
+Example retained layered damage at582<->1322, high proxy>3m point-planeP95:
+clean .745743m; v2 iSAM1.215994 / LM1.215958; v3 iSAM1.207567 / LM1.207580.
+At70<->1298 high-proxy coverage: clean .775821; v2 iSAM/LM .298038;
+v3 iSAM/LM .263611. These coexist with improved normal-plane ground consistency.
+Ground frozen-anchor distance also reveals tangential disagreement that ground
+height/point-plane metrics alone hide: P95 across1026 pairs clean .121742m,
+v2 iSAM .405151 / LM .404985, v3 iSAM .425736 / LM .425132m.
+Original matches may themselves be imperfect; compare matched IDs, not absolute
+values as independent truth. Some fixed full-cloud long-distance matches were
+already poor in the baseline and were deliberately retained, not sanitized.
+
+Correlation/noise audit
+loop_correlation_proxy.csv lists every pair of actual measured loops, their
+source/target support-ID Jaccard overlap, combined support sharing, shared graph
+endpoint, raw source translation/rotation and source timestamp gap. Support uses
+the recorded v2/v3 before5/after5 windows, clipped at the actual current frame.
+The source submap has no future scans. This is a testable shared-input proxy;
+it cannot measure covariance, effective sample size, or semantic independence.
+  clean: 1 loop pair; 0 shared-input pairs; 0 loops share an input with another.
+  v2:703 pairs;54 share scans (49 target-target);31/38 loops share some input.
+  v3:528 pairs;37 share scans (35 target-target);28/33 loops share some input.
+Source-source scan-ID overlap is0 in both v2/v3 (policy spacing), but repeated
+target scans and shared scene structure remain. Combined-support overlap max
+Jaccard=.47826087. Shared-input connected-component sizes are v2[21,7,3,1,1,1,1,1,1,1],
+v3[14,4,2,2,2,2,2,1,1,1,1,1]; these are GRAPH components, not effective counts of
+independent observations. Distinct scan IDs do not prove observations independent.
+The current diagonal graph treats separate loops as separate information sources;
+the data do not establish that this independence/noise model is calibrated.
+
+Interpretation and next evidence, not a policy change
+The batch result supports investigating measurement observability/multi-surface
+consistency and correlation-aware information modelling; it does NOT justify
+blanket sigma increases, uniform loop downweighting, post-hoc ID deletions or
+threshold relaxation. Low actual graph residual and Huber weight1 can coexist
+with worse heldout seam correspondence. Odom residual growth alone is expected
+when a graph redistributes inconsistency and is not a sufficient map-bad test.
+No gravity/roof causality, absolute localization accuracy, physical horizon or
+zero false-loop rate is established. Original factory map tilt/slope is preserved
+as input evidence, not converted to a target to force horizontal.
+
+Verification
+7/7 standalone unit/integration tests passed after observed RED cases, including
+independent robust formulas/API characterization, exact Jacobian finite difference,
+small real-GTSAM LM, source-time support clipping and immutable path protections.
+All six real exact batch solves and all six original1026/59 geometry evaluations
+completed. The nine-trajectory frozen-layer comparison completed. No ROS, robot,
+re-registration, original-data overwrite or production/main-install mutation.

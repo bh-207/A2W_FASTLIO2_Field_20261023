@@ -1,0 +1,3 @@
+# Unified diff context lines intentionally retain their leading/trailing space.
+# Keep audited FAST-LIO patch bytes stable; lint the actual source separately.
+patches/**/*.patch -whitespace

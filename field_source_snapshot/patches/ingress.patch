@@ -1,0 +1,73 @@
+--- /home/bh/A2W_FastLio2_controlled/src/a2w_fastlio_mapping/src/mapping_ingress_node.cpp
++++ /home/bh/A2W_FastLio2_controlled/captures/field_fixed_20261023_prepare_001/build_003/source/mapping_ingress_node.cpp
+@@ -1,3 +1,7 @@
++#define A2W_TRACE_ROS 1
++#include <iostream>
++#include <rclcpp/rclcpp.hpp>
++#include "startup_trace.hpp"
+ #include <cstddef>
+ #include <functional>
+ #include <memory>
+@@ -60,6 +64,13 @@
+ 
+     odometry_subscriber_.subscribe(this, odom_topic, rmw_qos_profile_default);
+     body_cloud_subscriber_.subscribe(this, body_cloud_topic, rmw_qos_profile_default);
++    odometry_subscriber_.registerCallback([](const nav_msgs::msg::Odometry::ConstSharedPtr& m){offline_handoff::event("ingress_odom_received",offline_handoff::stamp_ns(m->header.stamp));});
++    body_cloud_subscriber_.registerCallback([](const sensor_msgs::msg::PointCloud2::ConstSharedPtr& m){offline_handoff::event("ingress_cloud_received",offline_handoff::stamp_ns(m->header.stamp));});
++    handoff_timer_=create_wall_timer(std::chrono::milliseconds(100),[this]{
++      if(offline_handoff::report_ready("ingress",{
++        offline_handoff::edge(*this,keyframe_odom_publisher_,"/mapping/keyframe_odom",{"mapping_backend_node","field_capture_observer_*"}),
++        offline_handoff::edge(*this,keyframe_cloud_publisher_,"/mapping/keyframe_cloud",{"mapping_backend_node","field_capture_observer_*"})} ) && std::filesystem::exists(offline_handoff::trace->directory()/"live_release.json"))handoff_timer_->cancel();
++    });
+     synchronizer_ = std::make_shared<Synchronizer>(
+       odometry_subscriber_, body_cloud_subscriber_,
+       static_cast<std::uint32_t>(sync_queue_size));
+@@ -82,9 +93,11 @@
+     const nav_msgs::msg::Odometry::ConstSharedPtr & odometry,
+     const sensor_msgs::msg::PointCloud2::ConstSharedPtr & body_cloud)
+   {
++    offline_handoff::event("ingress_synchronized",offline_handoff::stamp_ns(odometry->header.stamp));
+     const auto adapted = makeFrontendFrame(
+       *odometry, *body_cloud, odom_frame_, tracking_frame_);
+     if (!adapted.success) {
++      offline_handoff::event("ingress_adapter_rejected",offline_handoff::stamp_ns(odometry->header.stamp));
+       ++adapter_rejection_count_;
+       RCLCPP_WARN_THROTTLE(
+         get_logger(), *get_clock(), 5000,
+@@ -94,6 +107,7 @@
+     }
+ 
+     const auto decision = keyframe_manager_->consider(adapted.frame);
++    offline_handoff::event("keyframe_decision",adapted.frame.stamp_ns,decision.keyframe?1:0,std::to_string(static_cast<int>(decision.reason)));
+     if (!decision.keyframe) {
+       ++policy_rejection_count_;
+       RCLCPP_DEBUG_THROTTLE(
+@@ -103,14 +117,19 @@
+       return;
+     }
+ 
++    offline_handoff::require_two(keyframe_odom_publisher_);
++    offline_handoff::require_two(keyframe_cloud_publisher_);
+     keyframe_odom_publisher_->publish(*odometry);
++    offline_handoff::event("keyframe_odom_publish_return",adapted.frame.stamp_ns);
+     keyframe_cloud_publisher_->publish(*body_cloud);
++    offline_handoff::event("keyframe_cloud_publish_return",adapted.frame.stamp_ns);
+     RCLCPP_INFO(
+       get_logger(), "Accepted keyframe %zu at %ld ns",
+       keyframe_manager_->size() - 1,
+       static_cast<long>(adapted.frame.stamp_ns));
+   }
+ 
++  rclcpp::TimerBase::SharedPtr handoff_timer_;
+   std::string odom_frame_;
+   std::string tracking_frame_;
+   std::unique_ptr<KeyframeManager> keyframe_manager_;
+@@ -128,6 +147,8 @@
+ 
+ int main(int argc, char ** argv)
+ {
++    try { offline_handoff::start("ingress"); } catch(const std::exception& e) { std::cerr<<e.what()<<"\n"; return 2; }
++
+   rclcpp::init(argc, argv);
+   try {
+     rclcpp::spin(std::make_shared<a2w_fastlio_mapping::MappingIngressNode>());

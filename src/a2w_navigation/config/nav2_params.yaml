@@ -1,0 +1,333 @@
+map_server:
+  ros__parameters:
+    use_sim_time: false
+    yaml_filename: ""
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: map
+    robot_base_frame: base_link
+    odom_topic: /Odometry
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    default_nav_to_pose_bt_xml: ""
+
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    odom_topic: /Odometry
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+    # Native FollowPath recovery: publish zero and retry transient invalid
+    # control for at most 1 s, then abort. No automatic goal resubmission.
+    failure_tolerance: 1.0
+    progress_checker_plugins: ["progress_checker"]
+    goal_checker_plugins: ["goal_checker"]
+    controller_plugins: ["FollowPath"]
+    progress_checker:
+      # Rotation counts as progress; a stationary/stalled robot still times out.
+      plugin: nav2_controller::PoseProgressChecker
+      # Let slow final XY/yaw corrections count while retaining the 15 s stall limit.
+      required_movement_radius: 0.10
+      required_movement_angle: 0.15
+      movement_time_allowance: 15.0
+    goal_checker:
+      plugin: nav2_controller::SimpleGoalChecker
+      stateful: true
+      xy_goal_tolerance: 0.20
+      yaw_goal_tolerance: 0.20
+    FollowPath:
+      plugin: nav2_mppi_controller::MPPIController
+      motion_model: Omni
+      time_steps: 36
+      model_dt: 0.05
+      batch_size: 1000
+      iteration_count: 2
+      vx_std: 0.20
+      vy_std: 0.10
+      # Broader yaw sampling, not a minimum-command floor or a speed multiplier.
+      wz_std: 0.30
+      # Forward-only speed increase; lateral/reverse/yaw and acceleration unchanged.
+      vx_max: 0.60
+      vx_min: -0.05
+      vy_max: 0.15
+      wz_max: 0.50
+      ax_max: 0.25
+      ax_min: -0.25
+      ay_max: 0.20
+      az_max: 0.80
+      prune_distance: 1.7
+      transform_tolerance: 0.20
+      temperature: 0.30
+      gamma: 0.015
+      # Publish decimated MPPI candidates for the first low-speed validation.
+      visualize: true
+      trajectory_step: 5
+      time_step: 3
+      regenerate_noises: true
+      critics:
+        - ConstraintCritic
+        - CostCritic
+        - GoalCritic
+        - GoalAngleCritic
+        - PathAlignCritic
+        - PathFollowCritic
+        - PathAngleCritic
+        - PreferForwardCritic
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 10.0
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 1.4
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.0
+        threshold_to_consider: 0.5
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 0.5
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 25.0
+        critical_cost: 200.0
+        consider_footprint: true
+        collision_cost: 1000000.0
+        near_goal_distance: 1.0
+        trajectory_point_step: 1
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 4
+        threshold_to_consider: 0.5
+        # The pruned local path is ~1.7 m; with 0.20 m points, 20 disables alignment.
+        offset_from_furthest: 5
+        use_path_orientations: false
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 5
+        threshold_to_consider: 1.4
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 1.0
+        # Humble uses this boolean; reverse capability itself follows vx_min.
+        forward_preference: true
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: false
+      global_frame: camera_init
+      robot_base_frame: base_link
+      rolling_window: true
+      width: 6
+      height: 6
+      resolution: 0.05
+      update_frequency: 10.0
+      publish_frequency: 10.0
+      transform_tolerance: 0.20
+      # URDF meshes at 30 measured normal-stance joint samples (2026-09-23),
+      # all wheel phases, plus 10 mm per side rounded outwards to millimetres.
+      # base_link is NOT the rectangle centre. Dynamic gait/payload validation
+      # is still pending; see docs/A2W_MODEL_INTEGRATION.md.
+      footprint: "[[0.398, 0.248], [0.398, -0.248], [-0.498, -0.248], [-0.498, 0.248]]"
+      # The rectangle already includes the requested 10 mm geometric margin.
+      footprint_padding: 0.0
+      plugins: ["obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        enabled: true
+        # Humble filters height again in the costmap frame after the source
+        # filter. Scan-derived body z=0 may become slightly negative in
+        # camera_init; keep both filters aligned so valid hits are not lost.
+        min_obstacle_height: -0.20
+        max_obstacle_height: 1.50
+        footprint_clearing_enabled: true
+        combination_method: 1
+        observation_sources: jt128_scan_cloud
+        jt128_scan_cloud:
+          topic: /a2w/scan_cloud
+          data_type: PointCloud2
+          marking: true
+          clearing: true
+          # This cloud is projected from a finite 360-degree LaserScan. Empty
+          # angular bins become 4.999 m endpoints used only for ray clearing.
+          min_obstacle_height: -0.20
+          max_obstacle_height: 1.50
+          obstacle_min_range: 0.20
+          obstacle_max_range: 4.00
+          raytrace_min_range: 0.20
+          raytrace_max_range: 5.00
+          observation_persistence: 0.0
+          expected_update_rate: 0.0
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        # User-requested compact trial. Below the ~0.327 m inscribed radius:
+        # little/no soft gradient remains, and center-cost collision shortcuts
+        # can miss footprint overlap. Not a hardware-validated safety margin.
+        # Keep the real footprint and MPPI consider_footprint unchanged.
+        inflation_radius: 0.30
+        cost_scaling_factor: 5.0
+      always_send_full_costmap: true
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: false
+      global_frame: map
+      robot_base_frame: base_link
+      resolution: 0.05
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      track_unknown_space: true
+      transform_tolerance: 0.20
+      # Must remain identical to the local-costmap A2-W footprint above.
+      footprint: "[[0.398, 0.248], [0.398, -0.248], [-0.498, -0.248], [-0.498, 0.248]]"
+      footprint_padding: 0.0
+      plugins: ["static_layer", "inflation_layer"]
+      static_layer:
+        plugin: nav2_costmap_2d::StaticLayer
+        map_subscribe_transient_local: true
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        # Compact trial, NOT a smaller physical robot. SmacPlanner2D can now
+        # place the center too close to walls; retain route footprint checks.
+        inflation_radius: 0.25
+        cost_scaling_factor: 5.0
+      always_send_full_costmap: true
+
+planner_server:
+  ros__parameters:
+    use_sim_time: false
+    expected_planner_frequency: 5.0
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: nav2_smac_planner/SmacPlanner2D
+      tolerance: 0.20
+      downsampling_factor: 1
+      allow_unknown: false
+      cost_travel_multiplier: 2.0
+      smooth_path: true
+      motion_model_for_search: 2D
+
+# Last Nav2-side safety filter. It intentionally does not replace the local
+# costmap and MPPI obstacle avoidance; it only slows/stops the outgoing Twist.
+collision_monitor:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: base_link
+    odom_frame_id: camera_init
+    transform_tolerance: 0.20
+    source_timeout: 0.50
+    # The finite scan stays in body; URDF supplies its fixed transform to
+    # base_link. Avoid current-time odometry correction newer than FAST-LIO TF.
+    base_shift_correction: false
+    stop_pub_timeout: 0.20
+    enabled: true
+    cmd_vel_in_topic: /cmd_vel
+    cmd_vel_out_topic: /cmd_vel_safe
+    observation_sources: ["jt128"]
+    jt128:
+      type: scan
+      topic: /a2w/scan
+      enabled: true
+    polygons: ["SlowZone", "StopZone"]
+    SlowZone:
+      type: circle
+      radius: 1.40
+      action_type: slowdown
+      max_points: 3
+      slowdown_ratio: 0.35
+      visualize: true
+      polygon_pub_topic: /collision_monitor/slow_zone
+      enabled: true
+    StopZone:
+      type: circle
+      # Temporary first-motion profile: the STEP footprint circumscribed
+      # radius is about 0.55 m, so retain a small emergency-stop margin while
+      # avoiding the previous 0.90 m zone masking valid MPPI commands.
+      radius: 0.60
+      action_type: stop
+      max_points: 3
+      visualize: true
+      polygon_pub_topic: /collision_monitor/stop_zone
+      enabled: true
+
+smoother_server:
+  ros__parameters:
+    use_sim_time: false
+    smoother_plugins: ["simple_smoother"]
+    simple_smoother:
+      plugin: nav2_smoother::SimpleSmoother
+      tolerance: 1.0e-10
+      max_its: 1000
+      do_refinement: true
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: false
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "wait", "assisted_teleop"]
+    spin:
+      plugin: nav2_behaviors/Spin
+    backup:
+      plugin: nav2_behaviors/BackUp
+    drive_on_heading:
+      plugin: nav2_behaviors/DriveOnHeading
+    wait:
+      plugin: nav2_behaviors/Wait
+    assisted_teleop:
+      plugin: nav2_behaviors/AssistedTeleop
+    global_frame: camera_init
+    robot_base_frame: base_link
+    transform_tolerance: 0.20
+    simulate_ahead_time: 1.0
+    max_rotational_vel: 0.50
+    min_rotational_vel: 0.05
+    rotational_acc_lim: 0.80
+
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: false
+    loop_rate: 10
+    stop_on_failure: true
+    waypoint_task_executor_plugin: wait_at_waypoint
+    wait_at_waypoint:
+      plugin: nav2_waypoint_follower::WaitAtWaypoint
+      enabled: true
+      waypoint_pause_duration: 0
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: false
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: OPEN_LOOP
+    max_velocity: [0.60, 0.15, 0.50]
+    min_velocity: [-0.05, -0.15, -0.50]
+    max_accel: [0.25, 0.20, 0.80]
+    max_decel: [-0.25, -0.20, -0.80]
+    odom_topic: /Odometry
+    odom_duration: 0.10
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 0.50

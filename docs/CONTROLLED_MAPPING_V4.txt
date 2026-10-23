@@ -1,0 +1,166 @@
+v4受控重新建图：现场命令（Ubuntu22.04 / ROS2 Humble）
+====================================================
+
+本入口使用独立编译的真实v4前端和匹配的保守后端，不使用主install旧前端。
+严格输入接口/初始化质量门/整程状态记录开启；增强回环、FPFH缓存及地图重力对齐关闭。
+JT128驱动已经在164运行；本机不启动第二套驱动，不控制机器人，不改系统时间或已标定外参。
+首次仅静止初始化后手控走短闭环，确认完整性，再创建全新会话走全厂。
+
+当前实机准备缺项
+---------------
+下文是严格入口首次准备时的来源快照。已核实单位/frame且明确授权沿用未验证初值的实验流程，
+请使用CONTROLLED_MAPPING_V4_EXPERIMENT.md；严格入口不会因此默认放行未验证实验初值。
+本机已保存captures/jt128_interface.json和captures/driver_source_status_20261021.md；不上传实机记录。
+本地maps/*/config/mapping_effective.yaml仅记录后端参数，不含164修正后驱动的单位/frame来源。
+本次两个164地址的只读连接均超时，故没有自动填入未知单位或时间值。
+这不否认驱动已修正；是缺少可绑定到本次采图的配置证据。unknown契约可先录raw，但不能start。
+必须把已核实的真实输入单位/frame、原有offset和驱动配置/版本/hash写入interface JSON；
+给出实际已标定jt128.yaml，extrinsic_evidence.base_config_sha256绑定该文件，R/T原样沿用。
+配置来源声明+hash不是物理标定认证；禁止把合成测试配置直接拿来驱动实机入口。
+
+一、首次下载和独立编译（不写主install）
+---------------------------------------
+git clone --branch feature/a2w-navigation --recurse-submodules https://github.com/AaronYanC/A2W_FastLio2.git "$HOME/A2W_FastLio2_controlled"
+cd "$HOME/A2W_FastLio2_controlled"
+./setup.sh --install-system
+./scripts/build_controlled_mapping.sh
+
+已安装依赖的电脑可改用 ./setup.sh --check；缺项再安装，不必每次运行系统安装。
+已有同名克隆不要重建/覆盖，在干净工作树使用git pull --ff-only及git submodule update --init --recursive。
+受控输出在.controlled_mapping/：backend_install、frontend隔离源码/二进制、build_identity.json。
+脚本默认重新编译补丁；--verified-frontend只供经过SHA审核的本地已有隔离构建复用，不是克隆必需项。
+构建中断后显式 ./scripts/build_controlled_mapping.sh --resume，旧attempt日志保留。
+不要把run_a2w_mapping.sh当成v4入口；旧脚本保留为生产回退，但不得与本入口同时运行。
+
+二、终端1：创建会话、输入检查、先开始最小录制
+--------------------------------------------
+cd "$HOME/A2W_FastLio2_controlled"
+unset LD_PRELOAD A2W_FROZEN_MATCHER_TIME
+unset ROS_DISCOVERY_SERVER ROS_STATIC_PEERS FASTRTPS_DEFAULT_PROFILES_FILE FASTDDS_DEFAULT_PROFILES_FILE
+# 必须与164驱动的实际域一致，先设置A2W_SENSOR_ROS_DOMAIN_ID；不能沿用合成测试218域。
+export ROS_DOMAIN_ID="${A2W_SENSOR_ROS_DOMAIN_ID:?请先填入164驱动实际ROS_DOMAIN_ID}"
+export ROS_LOCALHOST_ONLY=0
+mkdir -p captures
+
+# 首次生成来源模板；已有经审核的文件不要覆盖，直接复用。
+./scripts/mapping_capture.sh interface-template --output captures/jt128_interface.json
+
+# 仅此步需填入已核实的驱动来源，不是按模长猜单位。
+# gyro_unit=rad/s或deg/s；accel_unit=m/s^2或g；imu_frame/lidar_frame为实际header.frame_id。
+# imu_minus_lidar_offset_ns定义=t_IMU_raw-t_LiDAR，同原jt128参数严格一致，aligned=raw-offset，只应用一次。
+# *_evidence包含source/version/config/sha256；extrinsic_evidence还须有base_config_sha256。
+# 用你实际的已标定配置替换下条--base-config参数；不要修改R/T来让图看起来水平。
+
+SESSION_NAME="short_loop_$(date +%Y%m%d_%H%M%S)"
+SESSION="$PWD/captures/$SESSION_NAME"
+./scripts/mapping_capture.sh init "$SESSION_NAME" --interface captures/jt128_interface.json --base-config src/a2w_fastlio2_bringup/config/jt128.yaml
+printf '%s\n' "$SESSION" > captures/current_session.path
+
+# 仅配置本终端的DDS；自动按路由选网卡，不修改系统网络/164驱动。
+# 如自动选择不正确，先export A2W_NETWORK_INTERFACE=实际网卡，再重新运行resolve。
+source scripts/lib/a2w_common.sh
+export PYTHON_BIN=/usr/bin/python3
+export A2W_DDS_PEER=192.168.123.164
+a2w_resolve_network "$A2W_DDS_PEER"
+/usr/bin/python3 scripts/generate_cyclonedds_config.py --template config/cyclonedds_unitree_a2.xml.in --output "$SESSION/cyclonedds.xml" --pc-address "$A2W_PC_IP" --peer-address "$A2W_DDS_PEER"
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI="file://$SESSION/cyclonedds.xml"
+
+./scripts/mapping_capture.sh check "$SESSION"
+# check非0时阅读contract_errors/build_errors；严禁关质量门绕过。
+# 若仅来源缺失仍可先record raw，但后续start会拒绝。
+./scripts/mapping_capture.sh record "$SESSION" --compression none
+
+此终端保持运行。只录/lidar_points /lidar_imu /Odometry /tf /tf_static /mapping/registration_status。
+512MiB或300s分段；sqlite3使用resilient/WAL配置，避免边录边核查已提交raw时阻塞写入。
+默认cache16MiB（双缓冲最多约2倍），QoS按实际发布端检查。
+/tf_static使用reliable+transient_local，能录迟订阅前已发布的静态TF。
+可选--compression zstd为文件级无损压缩；先短试采评估CPU/磁盘开销，首次建议none。
+record同时观测字段、头部采样stamp、首末逐点timestamp、ring、QoS及接收/间隙代理，不改变消息。
+probe计数不证明无丢帧；start还需当前bag SQLite确实已提交两路raw，并保存起录先后证据。
+
+三、终端2：启动真实v4，确认实际KF初始化提交
+-------------------------------------------
+cd "$HOME/A2W_FastLio2_controlled"
+SESSION="$(cat captures/current_session.path)"
+unset LD_PRELOAD A2W_FROZEN_MATCHER_TIME
+unset ROS_DISCOVERY_SERVER ROS_STATIC_PEERS FASTRTPS_DEFAULT_PROFILES_FILE FASTDDS_DEFAULT_PROFILES_FILE
+export ROS_DOMAIN_ID="${A2W_SENSOR_ROS_DOMAIN_ID:?请先填入164驱动实际ROS_DOMAIN_ID}"
+export ROS_LOCALHOST_ONLY=0
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI="file://$SESSION/cyclonedds.xml"
+./scripts/mapping_capture.sh start "$SESSION"
+./scripts/mapping_capture.sh ready "$SESSION" --timeout 90
+
+保持机器人静止，允许一定倾角。明显运动/振动/时间异常时重新累计，不按计数强行通过。
+ready仅认真实INIT_COMMIT，校验实际accepted-window/group/state三个IMU stamp与g；还检查录包活性。
+Odometry出现不等于初始化已验收。打印的Z夹角是camera_init的+Z与-g夹角，不是机体roll/pitch。
+当前仅重力/gyro bias初始化；map_gravity_alignment=false，不强制地面水平，不在坡道重初始化。
+ready成功后才手控走短闭环。本软件不发任何运动命令。
+有效参数dump在snapshots/；节点及其二进制/DSO身份、原始参数和差异均在会话内。
+
+四、终端3：只监视已经提交的回环
+------------------------------
+cd "$HOME/A2W_FastLio2_controlled"
+SESSION="$(cat captures/current_session.path)"
+unset ROS_DISCOVERY_SERVER ROS_STATIC_PEERS FASTRTPS_DEFAULT_PROFILES_FILE FASTDDS_DEFAULT_PROFILES_FILE
+export ROS_DOMAIN_ID="${A2W_SENSOR_ROS_DOMAIN_ID:?请先填入164驱动实际ROS_DOMAIN_ID}"
+export ROS_LOCALHOST_ONLY=0
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI="file://$SESSION/cyclonedds.xml"
+./scripts/mapping_capture.sh shell "$SESSION" -- /usr/bin/python3 "$PWD/scripts/mapping_committed_loops.py" --csv "$SESSION/committed_loops.csv"
+
+仅接受精确mapping_backend_node的[LoopCommitted]；候选/accepted/等待提交/保存成功均不计数。
+现有[图优化完成]回环约束已提交中文日志仍保留，但不要笼统grep“成功”。
+输出current/history、原sensor stamp、system commit wall、steady本帧处理至提交、fitness/overlap等。
+未验证sensor与system同钟时延迟显示unknown，不能拿网络延迟当固定LiDAR-IMU offset。
+没有任何输出可能是尚无真实提交，并不自动证明检测器故障或允许强制加回环。
+
+五、终端2：停止行走、保存Map Bundle并等待响应
+-------------------------------------------
+./scripts/mapping_capture.sh save "$SESSION" --timeout 600
+
+本操作真实调用/mapping/save_map_bundle (a2w_fastlio_msgs/srv/SaveMapBundle)，
+output_path固定map_bundle，bundle_root固定本会话/bundles。
+先冻结接收范围→排空→最终图优化→总图/描述子/位姿同步→写Bundle→服务success→核对manifest/数量。
+必须等待success和本地完整性检查通过，不能根据回环提交提示就断电/强杀。
+若600s超时，保留所有进程，先查logs/backend.log，不重复save、不强停；底层任务可能仍在运行。
+bag异常不阻止保全地图，但save明确标capture_degraded；此时不能把数据集称作完整验收。
+
+六、正常退出与完整性检查
+----------------------
+# 保存成功后，在终端2正常停本会话三个节点和recorder；不会pkill其他程序，不删数据。
+./scripts/mapping_capture.sh stop "$SESSION"
+
+# 确认终端1的record已正常返回，metadata/record_closed已经写完；不要直接关闭终端。
+# 终端3按Ctrl+C关闭监视。然后在终端2：
+./scripts/mapping_capture.sh verify "$SESSION"
+
+结果在verification.json；核对bag元数据/6topic实际记录、点字段与source stamp、实际录制起止覆盖、
+raw接收间隙代理、/tf_static、MapBundle全部manifest、初始化trace及runtime状态关账。
+runtime必须closed&&flush_ok、dropped==write_errors==0、attempted==enqueued==written==CSV行数，
+同时无WRITE_ERROR/STATUS_WRITE_ERROR/QUEUE_DROP警报且CLOSED汇总相符。
+每条POST对应scan_end，是继承FAST-LIO内部double秒后取整的ns，不冒充原header exact整数；
+INIT提交窗口末IMU stamp另留精确整数。位置/速度/g在camera_init，bg/ba在body，外参T_body_LiDAR。
+POST与IMU预测阶段区分；正常行驶不旋转原输入、不扣两次重力、不强制roll/pitch=0。
+缺/tf_static时明确报告是否观察到publisher；不生成假TF补数。消息计数不证明无丢帧或物理精度。
+
+唯一输出目录：captures/<本次名称>/
+  bag/                     分段原始bag与metadata
+  bundles/map_bundle/      新Map Bundle（不覆盖原图）
+  snapshots/ identity.json 实际参数/差异/来源与软件二进制库身份
+  init_quality.csv* input.csv* runtime_state.csv* 初始化/输入/整程真实状态及元数据/关账
+  logs/ ros_logs/ ros_home/ 启动/保存/ROS日志
+  committed_loops.csv       独立监视终端的真实回环提交
+  verification.json        最终检查；capture_degraded时不算完整采集
+
+异常但要保留raw：不要关闭质量门。无成功保存时stop默认拒绝；明确放弃本次地图可用
+./scripts/mapping_capture.sh stop "$SESSION" --discard-unsaved
+这个开关只允许正常停自己的节点，不删除已录raw或任何旧Bundle；随后让record正常关闭。
+
+验收边界
+--------
+本次软件实跑结果见CONTROLLED_MAPPING_V4_VALIDATION.md：独立新前端+6话题bag+68次激光更新+4KF保存关账通过。
+localhost合成数据的真实节点/激光更新/录包/新Bundle测试与现场短闭环分开报告。
+它不能证明164驱动、实地时间同步、噪声门限、首次实机回环或地图精度已经通过。
+本轮不启动LI-Init，不让缺少联合标定阻塞raw采集，不切换导航地图、不发布修复地图。
