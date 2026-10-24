@@ -1,0 +1,34 @@
+{
+  "schema": "field_ground_identity_contract_v1",
+  "point_identity": "stable_preprocess_record_index",
+  "stable_across_runs": true,
+  "preprocessing_identity_sha256": "92a0554cae04dfd1a3e4da764f64dceb3967db6d7229967ccec098191da2c856",
+  "implementation_evidence": {
+    "common_files_sha256": {
+      "frontend/src/preprocess.cpp": "e53a4b48f821ebe8fa88a422570fdb52bfcddc1416d146b38ffa6b982367b570",
+      "frontend/src/preprocess.h": "68c3593e1a3fcb9f52a038b3d71af57ba39556d4cf2cfc8c5250c8b7d251e929"
+    },
+    "function_snippets_sha256": {
+      "preprocess_fnv_and_id_injection": "5ffd5b7f86f2d9296f9ee2e03303efbdbb19234916e8671e7451607157de8bd0",
+      "body_and_sidecar_export": "89a2a5dfa834a9f9ac38ae2b3510edf117f328e70c7e61881d523964311d78c2",
+      "time_comparator": "300a9de7ca33c5425fbf4108eb03e1de50021f90ea8ecb77b4bb6365d658f6e3",
+      "whole_cloud_copy_and_sort": "493d62c193015a682ed3db5bb718d5f3a8ae0cea43e6245d23c19c3394dfe649",
+      "deskew_writes_only_xyz": "17dae352d12311e7d9fb994f9bad687f5b03ad86f4e9deca8a43ddf6eddca1ab"
+    },
+    "point_id_semantics": "preprocess return record j before deskew time-sort; not LiDAR packet record",
+    "sidecar_encoding": "one uint32 little-endian ID per exported full body XYZI point; permutation0..N-1",
+    "exact_float_id_limit": "reject j>=16777216 before float normal_x storage",
+    "shared_preprocess_config": {
+      "feature_extract_enable": false,
+      "point_filter_num": 6,
+      "blind": 0.5,
+      "lidar_type": 2,
+      "scan_line": 128,
+      "timestamp_unit": 0
+    },
+    "source_scan_identity": "0-based original Bag cloud consumption ID and exact integer header_ns",
+    "body_transform": "p_I=R_I_L*p_L+t_I_L; fixed extrinsic R=I,T=[-0.00862,0.00914,0.03916]"
+  },
+  "validation_rule": "each run must prove all original preprocessing header/count/XYZ-I-curvature FNV fingerprints equal; each full POST body sidecar is a complete unique ID permutation",
+  "excluded_from_identity_contract": "whole IMU propagation/initialization functions and joint branch; changed XYZ deskew output is expected, identity is not tied to resulting XYZ"
+}

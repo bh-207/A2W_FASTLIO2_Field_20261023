@@ -79,3 +79,7 @@ compile_commands.json
 # Generated runtime configuration
 cyclonedds.xml
 *.runtime.yaml
+
+# Local audited field interface evidence is never part of the public source export
+/experiments/field_frontend_z_init_20261024/config/baseline.yaml
+/experiments/field_frontend_z_init_20261024/source/config/field_input_contract.json

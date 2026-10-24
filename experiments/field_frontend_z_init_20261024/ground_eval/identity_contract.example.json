@@ -1,0 +1,10 @@
+{
+  "schema": "field_ground_identity_contract_v1",
+  "point_identity": "stable_preprocess_record_index",
+  "stable_across_runs": false,
+  "preprocessing_identity_sha256": "REPLACE_WITH_VERIFIED_SOURCE_AND_CONFIG_HASH",
+  "implementation_evidence": "PENDING: verify preprocess assigns j to unused normal_x only offline; Undistort curvature sort carries j; no subsequent deletion or overwrite; XYZI export and uint32 sidecar have same size",
+  "point_id_scope": "0-based index of fixed preprocess returned points before deskew sorting; not original LiDAR packet index",
+  "candidate_frame": "body_IMU",
+  "input_correspondence": "integer source_scan_id and original exact source_header_stamp_ns; every source preprocess header/count/FNV64 must match"
+}

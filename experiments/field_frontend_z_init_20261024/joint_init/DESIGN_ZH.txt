@@ -1,0 +1,99 @@
+独立 LiDAR—IMU 联合初始化（默认关闭）
+
+边界
+仅使用新实验导出的预处理原始扫描与原 Bag 的原始 IMU CSV；不使用 FAST-LIO 的
+body 点云、姿态、轨迹、地图作为独立运动测量。工具不连接机器人、不启动 ROS 节点。
+R_IL 固定 I，t_IL=[-.00862,.00914,.03916] m，offset=0，外参不估计。
+常速度去畸变使用前一对 LiDAR-only 配准得到的速度/角速度，首帧保持原始形状。
+
+加速度域
+模型 a_W = R_WI (alpha*a_raw - ba_int_I) + g_W。
+alpha 必须由本轮完整 baseline 实际 INIT 输出传入；CLI 参数 --acc-scale 必填。
+ba_raw_equivalent_report_only = ba_int_I/alpha 只报告等效数值，不代表硬件完成标定。
+S2 的长度与现有前端完全一致为 9.809；两个方向自由，不给倾角或重力方向先验。
+不更改前端 Q，不利用 IMU.orientation，不把平均加速度当独立重力真值。
+
+数学核
+由 T_WI=T_WL*T_IL^{-1} 得 R_WI=R_WL、p_WI=p_WL-R_WI*t_IL。
+LiDAR-only SO(3) RotationSpline 在原始 IMU timestamp 处提供 R_WI(t)。
+每个 LiDAR 间隔计算 Vf=integral R*a_int dt，Pf=integral (t_end-t)R*a_int dt，
+VR=integral R dt，PR=integral (t_end-t)R dt；原始 IMU midpoint 积分。
+相邻两个间隔的位移速度差消去未知速度：
+  dp_right/dt_right-dp_left/dt_left
+  = 0.5*(dt_left+dt_right)*g
+    + Vf_left-Pf_left/dt_left+Pf_right/dt_right
+    - (VR_left-PR_left/dt_left+PR_right/dt_right)*ba_int。
+对[g_W,ba_int_I]自由六维设计矩阵执行SVD作为诊断；实际物理模型g固定长度，
+故以解附近[Ag*Mx(g),Aba]的五维设计矩阵作为激励门，相对奇异值阈值仍为 .005。
+Mx是g方向弧度扰动到世界g三维变化的Jacobian，与真实IKFoM S2_Mx(0)仅差正交基变换。
+静止free秩3/S2秩3：free三维耦合中径向由长度去除，仍有两个方向歧义，拒绝。
+绕重力轴yaw-only可free秩5/S2秩5，长度可去掉径向g/baz歧义，方向与ba可辨识。
+绕垂直于g的单轴运动可free秩5/S2秩4，仍缺一个方向，拒绝。
+不能把free六维额外径向自由度强行当作实际S2物理模型的必要可观测条件。
+S2五维不满秩返回明确nullspace及Mx，不生成偏置/重力候选，也不产生虚假有限cov。
+近退化方向同样列为不足激励。known长度绝非独立姿态真值，方向仍必须由运动辨识。
+bg 来自原始 gyro 的真实 SO(3) 预积分与 LiDAR 相对旋转残差，非静止均值。
+方向初猜仅作优化seed，正反两个半球都求约束LS，以真实残差和明确bias幅值门选分支；
+没有加入初猜方向prior。free六维满秩时才能用free解检查重力长度，否则其norm不具可辨识性。
+随后约束|g|=9.809联合重估方向及两偏置。
+free秩5时还沿加权自由null方向解析求球面交点，分别优化两支；局部S2秩5并不保证全局唯一。
+若多个分支满足原bias幅值门，且weighted chi²相差<=3.84（预先固定1DoF 95%分离门），
+返回ambiguous_s2_branch，不按极小代价差或自由最小范数选枝。例：仅绕x旋转时
+g_x=+.8/ba_x=+.8 与 g_x=-.8/ba_x=-.8、相同g_z可完全等价，必须拒绝。
+分支检查范围仅是检测到free秩5的一维null球面交点；对于一般带噪声full秩6运动，
+它不是所有潜在局部minimum/全局唯一性的证明，candidate中branch_check_scope明确保留此限制。
+reduced chi²自由度为残差维数-8，因为g_direction2+ba3+bg3，不是自由g3模型的-9。
+对现有状态只投影g而不重新优化ba会改变动力学，因此没有这样处理。
+
+协方差
+ICP的最近邻点平面Hessian给局部协方差，额外显式每帧系统误差下限5mm/.002rad，
+不把大量点当成可以任意压低不确定度的独立真值。相邻相对位姿通过Jacobian传播，
+保存完整跨时间相关pose covariance；坐标为[world平移,body右扰动旋转]。
+联合核对全部LiDAR位姿计算残差Jacobian，传播原始accel采样共享/重叠积分协方差，
+gyro采样噪声按不重叠区间保守传播。GLS共用pose噪声使g/ba/bg产生交叉cov。
+残差reduced chi²大于1时按该比例增大不确定度，绝不因拟合好而缩小输入噪声。
+full_covariance为18x18，顺序[p_WI,theta_I_right,v_WI,g_W,ba_int_I,bg_I]，每项3维。
+g径向为零方差，因为S2本来只有2自由度；g方向仍有有限不确定性，矩阵是半正定。
+前端23x23 P需由真实S2_Mx对应的局部Jacobian投影，并保留已有外参有限不确定度。
+注意：协方差是线性化、固定外参/alpha下的统计近似，未覆盖重复场景、ICP局部极小、
+运动模型与扫描去畸变的全部系统误差；绝不能当作真值或实机标定通过证明。
+
+训练、验证和提交
+默认以首60s内最后约15s作holdout；训练部分只取结束前最多30s，限制矩阵和线性化成本。
+训练段最后状态由独立LiDAR/IMU共同求得，随后只用raw IMU传播至最后holdout扫描时间，
+协方差按同一18维误差动力学传播；holdout LiDAR仅验预测，不参与重估state。
+默认独立holdout位置误差阈值 .5m、旋转 .05rad，均记录在候选；不得为了通过而事后放宽。
+候选commit_stamp_ns是整个训练+验证窗口最后扫描的END时间（约60s）。这属于离线batch
+lookahead，运行前端只能在所有验证数据可用的commit时间才初始化，不能冒称45s因果验证。
+之前扫描应记录init_skip并保留完整账本；之后首个去畸变必须从commit传播边界连续接上。
+holdout仍共享同一独立LiDAR轨迹的配准漂移，是独立传感器预测验算而不是外部真值验收。
+train_fraction必须在(0,1)，holdout至少3扫描且训练末到验证末至少.5s，禁止空验证通过。
+run()端到端测试实际生成NPZ+CSV，证明holdout姿态/位置未进入拟合，并在修改holdout
+位置100m后保持g/ba/bg不变而拒绝候选；commit_stamp始终在所有验证可用之后。
+
+命令与文件契约
+1 manifest.csv列scan_id,stamp_ns,path；stamp_ns=原扫描BEGIN；path指binary/ascii PCD，
+  包含x/y/z/curvature（curvature单位相对毫秒）；也支持npz(xyz,offset_s)、npy(Nx4，第四列ms)。
+  仅抽取扫描而不重放全Bag：
+  OPENBLAS_NUM_THREADS=1 python3 lidar_registration.py MANIFEST.csv OUTDIR --stride 3 --seconds 60
+  运动窗例：增加 --start-seconds 150 --seconds 65，表示原始时间150~215s；不读FAST-LIO运动值。
+  输出 OUTDIR/lidar_poses.npz 和registration.json（每次配准质量及固定参数）。
+2 IMU.csv列header_ns或stamp_ns、ax/ay/az、gx/gy/gz，均原SI数值，timestamp保持整数ns读取。
+  OPENBLAS_NUM_THREADS=1 python3 joint_cli.py OUTDIR/lidar_poses.npz IMU.csv CANDIDATE.json --acc-scale BASELINE_ALPHA
+3 单元测试：
+  OPENBLAS_NUM_THREADS=1 python3 -m unittest -v
+  测试覆盖非零g/ba/bg，静止/单轴不可辨识，known长度下yaw可辨识反例，cov传播，S2方向自由/径向约束，显式alpha域，
+  非零固定lever arm，来源拒绝，IMU gap，原始扫描ICP刚体恢复/平面退化，实际Huber目标单调，
+  后段窗口原始时间/扫描ID，deskew符号和holdout传播。
+
+失败与回退
+任何配准退化/不收敛、时间缺口、缺乏g-ba激励或独立holdout预测失败都应拒绝候选。
+候选JSON accepted=false 时，root不得使用试算数组初始化；保留既有gated初始化为显式回退。
+模型单位错误/非有限输入等硬失败通过异常/非零退出码报告，不悄悄裁剪或制造orientation。
+单元测试与纯离线运行通过不能代替原速实时性、ARM64、硬件外参或现场导航验证。
+
+数学方法来源
+惯性初始化采用独立运动估计和原始IMU估计重力/偏置，而非自输出作为真值；
+参考 Inertial-Only Optimization for Visual-Inertial Initialization (Campos et al., 2020):
+https://arxiv.org/abs/2003.05766 。这里使用公制LiDAR轨迹，故无单目scale自由度；
+本工具的三位姿消元/协方差实现以自身代码与单元测试为准，不宣称复现整篇方法。

@@ -1,0 +1,1857 @@
+#define A2W_TRACE_ROS 1
+#include <iostream>
+#include <rclcpp/rclcpp.hpp>
+#include "startup_trace.hpp"
+// This is an advanced implementation of the algorithm described in the
+// following paper:
+//   J. Zhang and S. Singh. LOAM: Lidar Odometry and Mapping in Real-time.
+//     Robotics: Science and Systems Conference (RSS). Berkeley, CA, July 2014.
+
+// Modifier: Livox               dev@livoxtech.com
+
+// Copyright 2013, Ji Zhang, Carnegie Mellon University
+// Further contributions copyright (c) 2016, Southwest Research Institute
+// All rights reserved.
+//
+// Modified by Hesai Technology, 2026-06.
+// Modifications: adapted for Hesai JT16 / JT32 / JT128 LiDARs; ported to ROS 2
+// (rclcpp); added /map_save service and pcd_save support; added
+// imu_gyr_unit (auto/deg/rad) parameter; re-enabled exit-time PCD save
+// (the buffer accumulation block was commented out upstream, so
+// pcd_save_en never produced a file).
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+//
+// 1. Redistributions of source code must retain the above copyright notice,
+//    this list of conditions and the following disclaimer.
+// 2. Redistributions in binary form must reproduce the above copyright notice,
+//    this list of conditions and the following disclaimer in the documentation
+//    and/or other materials provided with the distribution.
+// 3. Neither the name of the copyright holder nor the names of its
+//    contributors may be used to endorse or promote products derived from this
+//    software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
+#include <omp.h>
+#include <algorithm>
+#include <cmath>
+#include <mutex>
+#include <math.h>
+#include <thread>
+#include <fstream>
+#include <csignal>
+#include <chrono>
+#include <unistd.h>
+#include <so3_math.h>
+#include <rclcpp/rclcpp.hpp>
+#include <Eigen/Core>
+#include "offline_consume_output.hpp"
+#include <rosbag2_cpp/reader.hpp>
+#include <rclcpp/serialization.hpp>
+#include "IMU_Processing.hpp"
+#include "frontend_runtime_state_v4.hpp"
+#include "frontend_input_integrity.hpp"
+#include "frontend_async_input_trace.hpp"
+#include "pose_covariance.hpp"
+#include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <visualization_msgs/msg/marker.hpp>
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/io/pcd_io.h>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/msg/imu.hpp>
+#include <std_srvs/srv/trigger.hpp>
+#include <tf2_ros/transform_broadcaster.h>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/vector3.hpp>
+#include "preprocess.h"
+#include <ikd-Tree/ikd_Tree.h>
+
+#define INIT_TIME           (0.1)
+#define LASER_POINT_COV     (0.001)
+#define MAXN                (720000)
+#define PUBFRAME_PERIOD     (20)
+
+/*** Time Log Variables ***/
+double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_time = 0.0;
+// Allocated only when runtime_pos_log_enable is set (12 x MAXN doubles ~ 66 MB)
+vector<double> T1, s_plot, s_plot2, s_plot3, s_plot4, s_plot5, s_plot6, s_plot7, s_plot8, s_plot9, s_plot10, s_plot11;
+double match_time = 0, solve_time = 0, solve_const_H_time = 0;
+int    kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delete_counter = 0;
+bool   runtime_pos_log = false, pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true;
+bool   pcd_save_dirty = false;
+double pcd_save_leaf_size = 0.0;   // >0: periodically voxel-downsample the save buffer
+bool   tum_save_en = false;        // export trajectory in TUM format to Log/traj_tum.txt
+ofstream fout_tum;
+/**************************/
+
+float res_last[100000] = {0.0};
+float DET_RANGE = 300.0f;
+const float MOV_THRESHOLD = 1.5f;
+double time_diff_lidar_to_imu = 0.0;
+
+mutex mtx_buffer;
+condition_variable sig_buffer;
+
+string root_dir = ROOT_DIR;
+string map_file_path, lid_topic, imu_topic;
+
+double res_mean_last = 0.05, total_residual = 0.0;
+double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
+double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
+double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
+double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
+int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
+int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
+bool   point_selected_surf[100000] = {0};
+bool   lidar_pushed, flg_first_scan = true, flg_EKF_inited;
+bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
+bool    is_first_lidar = true;
+bool    imu_gyr_is_deg = false;
+bool    imu_gyr_unit_resolved = false;
+string  imu_gyr_unit_mode = "auto";
+vector<double> imu_acc_norm_samples;
+frontend_init_v4::InputConfig frontend_input_config_v4;
+std::unique_ptr<frontend_init_v4::InputAdapter> frontend_input_adapter_v4;
+std::ofstream frontend_input_trace_v4;
+
+vector<vector<int>>  pointSearchInd_surf; 
+vector<BoxPointType> cub_needrm;
+vector<PointVector>  Nearest_Points; 
+vector<double>       extrinT(3, 0.0);
+vector<double>       extrinR(9, 0.0);
+deque<double>                     time_buffer;
+deque<PointCloudXYZI::Ptr>        lidar_buffer;
+deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
+// Observation-only identities travel beside the unchanged algorithm buffers.
+std::unique_ptr<frontend_integrity::Trace> input_integrity;
+std::unique_ptr<frontend_input_csv::AsyncWriter> async_input_trace_v4;
+deque<std::uint64_t> integrity_imu_ids,integrity_cloud_ids;
+deque<std::int64_t> integrity_cloud_stamps;
+std::uint64_t integrity_group=0,integrity_group_cloud_id=0;
+std::int64_t integrity_group_cloud_stamp=0;
+using IntegrityStage=frontend_integrity::Stage;
+void enqueue_input_trace_v4(const frontend_init_v4::Sample& raw,
+    const frontend_init_v4::Sample* si,std::uint64_t callback_id) {
+    frontend_input_csv::Row row;row.adapted=si!=nullptr;row.raw_stamp_ns=raw.stamp_ns;
+    row.callback_id=callback_id;row.input_frame=raw.frame_id;row.gyro_unit=raw.gyro_unit;row.accel_unit=raw.accel_unit;
+    std::copy(raw.acc.begin(),raw.acc.end(),row.values.begin());
+    std::copy(raw.gyro.begin(),raw.gyro.end(),row.values.begin()+3);
+    if(si){row.aligned_stamp_ns=si->stamp_ns;row.conversion_count=si->conversion_count;row.time_adjustment_count=si->time_adjustment_count;
+      std::copy(si->acc.begin(),si->acc.end(),row.values.begin()+6);std::copy(si->gyro.begin(),si->gyro.end(),row.values.begin()+9);}
+    if(!async_input_trace_v4->enqueue(std::move(row)))throw std::runtime_error("async input trace enqueue failed: inspect overflow/io_errors");
+}
+bool close_input_trace_v4() noexcept {
+    if(async_input_trace_v4){async_input_trace_v4->close();return async_input_trace_v4->stats().healthy();}
+    if(frontend_input_trace_v4.is_open()){frontend_input_trace_v4.flush();frontend_input_trace_v4.close();}
+    return !frontend_input_trace_v4.fail();
+}
+frontend_integrity::Snapshot integrity_snapshot(bool computing=false) {
+    frontend_integrity::Snapshot s;s.computing=computing;
+    s.lidar_buffer_size=lidar_buffer.size();s.imu_buffer_size=imu_buffer.size();
+    if(!imu_buffer.empty()){s.imu_buffer_front_ns=offline_handoff::stamp_ns(imu_buffer.front()->header.stamp);s.imu_buffer_back_ns=offline_handoff::stamp_ns(imu_buffer.back()->header.stamp);}
+    if(!integrity_cloud_stamps.empty())s.lidar_buffer_front_stamp_ns=integrity_cloud_stamps.front();
+    return s;
+}
+struct IntegrityComputeScope {
+    bool published;
+    IntegrityComputeScope():published(false) {
+      input_integrity->record(IntegrityStage::ComputeBegin,integrity_group_cloud_stamp,integrity_group_cloud_id,integrity_group);
+      published=input_integrity->status(integrity_snapshot(true));
+    }
+    ~IntegrityComputeScope() noexcept {
+      try {input_integrity->record(IntegrityStage::ComputeEnd,integrity_group_cloud_stamp,integrity_group_cloud_id,integrity_group);
+        if(published)input_integrity->status(integrity_snapshot(),true);
+      }catch(...){} // final close/status reports persistence failures separately
+    }
+};
+
+PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
+PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
+PointCloudXYZI::Ptr feats_down_body(new PointCloudXYZI());
+PointCloudXYZI::Ptr feats_down_world(new PointCloudXYZI());
+PointCloudXYZI::Ptr normvec(new PointCloudXYZI(100000, 1));
+PointCloudXYZI::Ptr laserCloudOri(new PointCloudXYZI(100000, 1));
+PointCloudXYZI::Ptr corr_normvect(new PointCloudXYZI(100000, 1));
+PointCloudXYZI::Ptr _featsArray;
+
+pcl::VoxelGrid<PointType> downSizeFilterSurf;
+pcl::VoxelGrid<PointType> downSizeFilterMap;
+
+KD_TREE<PointType> ikdtree;
+
+V3F XAxisPoint_body(LIDAR_SP_LEN, 0.0, 0.0);
+V3F XAxisPoint_world(LIDAR_SP_LEN, 0.0, 0.0);
+V3D euler_cur;
+V3D position_last(Zero3d);
+V3D Lidar_T_wrt_IMU(Zero3d);
+M3D Lidar_R_wrt_IMU(Eye3d);
+
+/*** EKF inputs and output ***/
+MeasureGroup Measures;
+esekfom::esekf<state_ikfom, 12, input_ikfom> kf;
+state_ikfom state_point;
+static_assert(decltype(state_point.pos)::IDX == 0, "pose covariance requires IKFoM position at index 0");
+static_assert(decltype(state_point.rot)::IDX == 3, "pose covariance requires IKFoM rotation at index 3");
+vect3 pos_lid;
+
+nav_msgs::msg::Path path;
+nav_msgs::msg::Odometry odomAftMapped;
+geometry_msgs::msg::Quaternion geoQuat;
+geometry_msgs::msg::PoseStamped msg_body_pose;
+
+shared_ptr<Preprocess> p_pre(new Preprocess());
+shared_ptr<ImuProcess> p_imu(new ImuProcess());
+
+volatile std::sig_atomic_t stop_signal = 0;
+frontend_contract::Lifecycle frontend_lifecycle;
+
+void SigHandle(int sig)
+{
+    stop_signal = sig;
+}
+
+void observe_stop_request()
+{
+    if (stop_signal) frontend_lifecycle.request_stop("signal", stop_signal);
+}
+
+inline void dump_lio_state_to_log(FILE *fp)  
+{
+    V3D rot_ang(Log(state_point.rot.toRotationMatrix()));
+    fprintf(fp, "%lf ", Measures.lidar_beg_time - first_lidar_time);
+    fprintf(fp, "%lf %lf %lf ", rot_ang(0), rot_ang(1), rot_ang(2));                   // Angle
+    fprintf(fp, "%lf %lf %lf ", state_point.pos(0), state_point.pos(1), state_point.pos(2)); // Pos  
+    fprintf(fp, "%lf %lf %lf ", 0.0, 0.0, 0.0);                                        // omega  
+    fprintf(fp, "%lf %lf %lf ", state_point.vel(0), state_point.vel(1), state_point.vel(2)); // Vel  
+    fprintf(fp, "%lf %lf %lf ", 0.0, 0.0, 0.0);                                        // Acc  
+    fprintf(fp, "%lf %lf %lf ", state_point.bg(0), state_point.bg(1), state_point.bg(2));    // Bias_g  
+    fprintf(fp, "%lf %lf %lf ", state_point.ba(0), state_point.ba(1), state_point.ba(2));    // Bias_a  
+    fprintf(fp, "%lf %lf %lf ", state_point.grav[0], state_point.grav[1], state_point.grav[2]); // Bias_a  
+    fprintf(fp, "\r\n");  
+    fflush(fp);
+}
+
+void pointBodyToWorld_ikfom(PointType const * const pi, PointType * const po, state_ikfom &s)
+{
+    V3D p_body(pi->x, pi->y, pi->z);
+    V3D p_global(s.rot * (s.offset_R_L_I*p_body + s.offset_T_L_I) + s.pos);
+
+    po->x = p_global(0);
+    po->y = p_global(1);
+    po->z = p_global(2);
+    po->intensity = pi->intensity;
+}
+
+
+void pointBodyToWorld(PointType const * const pi, PointType * const po)
+{
+    V3D p_body(pi->x, pi->y, pi->z);
+    V3D p_global(state_point.rot * (state_point.offset_R_L_I*p_body + state_point.offset_T_L_I) + state_point.pos);
+
+    po->x = p_global(0);
+    po->y = p_global(1);
+    po->z = p_global(2);
+    po->intensity = pi->intensity;
+}
+
+template<typename T>
+void pointBodyToWorld(const Matrix<T, 3, 1> &pi, Matrix<T, 3, 1> &po)
+{
+    V3D p_body(pi[0], pi[1], pi[2]);
+    V3D p_global(state_point.rot * (state_point.offset_R_L_I*p_body + state_point.offset_T_L_I) + state_point.pos);
+
+    po[0] = p_global(0);
+    po[1] = p_global(1);
+    po[2] = p_global(2);
+}
+
+void RGBpointBodyToWorld(PointType const * const pi, PointType * const po)
+{
+    V3D p_body(pi->x, pi->y, pi->z);
+    V3D p_global(state_point.rot * (state_point.offset_R_L_I*p_body + state_point.offset_T_L_I) + state_point.pos);
+
+    po->x = p_global(0);
+    po->y = p_global(1);
+    po->z = p_global(2);
+    po->intensity = pi->intensity;
+}
+
+void RGBpointBodyLidarToIMU(PointType const * const pi, PointType * const po)
+{
+    V3D p_body_lidar(pi->x, pi->y, pi->z);
+    V3D p_body_imu(state_point.offset_R_L_I*p_body_lidar + state_point.offset_T_L_I);
+
+    po->x = p_body_imu(0);
+    po->y = p_body_imu(1);
+    po->z = p_body_imu(2);
+    po->intensity = pi->intensity;
+}
+
+void points_cache_collect()
+{
+    PointVector points_history;
+    ikdtree.acquire_removed_points(points_history);
+    // for (int i = 0; i < points_history.size(); i++) _featsArray->push_back(points_history[i]);
+}
+
+BoxPointType LocalMap_Points;
+bool Localmap_Initialized = false;
+void lasermap_fov_segment()
+{
+    cub_needrm.clear();
+    kdtree_delete_counter = 0;
+    kdtree_delete_time = 0.0;    
+    pointBodyToWorld(XAxisPoint_body, XAxisPoint_world);
+    V3D pos_LiD = pos_lid;
+    if (!Localmap_Initialized){
+        for (int i = 0; i < 3; i++){
+            LocalMap_Points.vertex_min[i] = pos_LiD(i) - cube_len / 2.0;
+            LocalMap_Points.vertex_max[i] = pos_LiD(i) + cube_len / 2.0;
+        }
+        Localmap_Initialized = true;
+        return;
+    }
+    float dist_to_map_edge[3][2];
+    bool need_move = false;
+    for (int i = 0; i < 3; i++){
+        dist_to_map_edge[i][0] = fabs(pos_LiD(i) - LocalMap_Points.vertex_min[i]);
+        dist_to_map_edge[i][1] = fabs(pos_LiD(i) - LocalMap_Points.vertex_max[i]);
+        if (dist_to_map_edge[i][0] <= MOV_THRESHOLD * DET_RANGE || dist_to_map_edge[i][1] <= MOV_THRESHOLD * DET_RANGE) need_move = true;
+    }
+    if (!need_move) return;
+    BoxPointType New_LocalMap_Points, tmp_boxpoints;
+    New_LocalMap_Points = LocalMap_Points;
+    float mov_dist = max((cube_len - 2.0 * MOV_THRESHOLD * DET_RANGE) * 0.5 * 0.9, double(DET_RANGE * (MOV_THRESHOLD -1)));
+    for (int i = 0; i < 3; i++){
+        tmp_boxpoints = LocalMap_Points;
+        if (dist_to_map_edge[i][0] <= MOV_THRESHOLD * DET_RANGE){
+            New_LocalMap_Points.vertex_max[i] -= mov_dist;
+            New_LocalMap_Points.vertex_min[i] -= mov_dist;
+            tmp_boxpoints.vertex_min[i] = LocalMap_Points.vertex_max[i] - mov_dist;
+            cub_needrm.push_back(tmp_boxpoints);
+        } else if (dist_to_map_edge[i][1] <= MOV_THRESHOLD * DET_RANGE){
+            New_LocalMap_Points.vertex_max[i] += mov_dist;
+            New_LocalMap_Points.vertex_min[i] += mov_dist;
+            tmp_boxpoints.vertex_max[i] = LocalMap_Points.vertex_min[i] + mov_dist;
+            cub_needrm.push_back(tmp_boxpoints);
+        }
+    }
+    LocalMap_Points = New_LocalMap_Points;
+
+    points_cache_collect();
+    double delete_begin = omp_get_wtime();
+    if(cub_needrm.size() > 0) kdtree_delete_counter = ikdtree.Delete_Point_Boxes(cub_needrm);
+    kdtree_delete_time = omp_get_wtime() - delete_begin;
+}
+
+void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg) 
+{
+    const auto integrity_stamp=offline_handoff::stamp_ns(msg->header.stamp);
+    const auto integrity_id=input_integrity->record(IntegrityStage::CloudRaw,integrity_stamp);
+    mtx_buffer.lock();
+    scan_count ++;
+    double cur_time = get_time_sec(msg->header.stamp);
+    double preprocess_start_time = omp_get_wtime();
+    if (!is_first_lidar && cur_time < last_timestamp_lidar)
+    {
+        std::cerr << "lidar loop back, clear buffer" << std::endl;
+        lidar_buffer.clear();
+        input_integrity->record(IntegrityStage::CloudCleared,integrity_stamp,integrity_id,0,integrity_cloud_ids.size());
+        integrity_cloud_ids.clear();integrity_cloud_stamps.clear();
+    }
+    if (is_first_lidar)
+    {
+        is_first_lidar = false;
+    }
+
+    PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
+    const auto integrity_preprocess_start=frontend_integrity::steady_ns();
+    p_pre->process(msg, ptr);
+    if(offline_consume::output)offline_consume::output->preprocess(integrity_id-1,integrity_stamp,*ptr);
+    input_integrity->record(IntegrityStage::CloudPreprocessed,integrity_stamp,integrity_id,0,frontend_integrity::steady_ns()-integrity_preprocess_start,ptr->points.size());
+    static bool scan_span_checked = false;
+    if (!scan_span_checked && ptr->points.size() > 100)
+    {
+        scan_span_checked = true;
+        const double span_ms = ptr->points.back().curvature;
+        if (span_ms <= 0.01 || span_ms > 1000.0)
+            std::cerr << "[WARN] per-scan time span " << span_ms
+                      << " ms is implausible; check preprocess.timestamp_unit "
+                      << "(and that the driver outputs per-point timestamps)" << std::endl;
+    }
+    lidar_buffer.push_back(ptr);
+    integrity_cloud_ids.push_back(integrity_id);integrity_cloud_stamps.push_back(integrity_stamp);
+    time_buffer.push_back(cur_time);
+    last_timestamp_lidar = cur_time;
+    input_integrity->record(IntegrityStage::CloudBuffered,integrity_stamp,integrity_id,0,lidar_buffer.size(),imu_buffer.size());
+    if (runtime_pos_log && scan_count < MAXN) s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
+    mtx_buffer.unlock();
+    sig_buffer.notify_all();
+}
+
+double timediff_lidar_wrt_imu = 0.0;
+
+bool resolve_imu_gyr_unit(const sensor_msgs::msg::Imu &msg)
+{
+    if (imu_gyr_unit_resolved)
+        return true;
+
+    const double ax = msg.linear_acceleration.x;
+    const double ay = msg.linear_acceleration.y;
+    const double az = msg.linear_acceleration.z;
+    const double acc_norm = sqrt(ax * ax + ay * ay + az * az);
+    if (!std::isfinite(acc_norm) || acc_norm < 0.1)
+        return false;
+
+    imu_acc_norm_samples.push_back(acc_norm);
+    vector<double> samples = imu_acc_norm_samples;
+    std::sort(samples.begin(), samples.end());
+    const double median_acc_norm = samples[samples.size() / 2];
+    if (median_acc_norm >= 4.0 && median_acc_norm <= 6.0)
+    {
+        RCLCPP_WARN(rclcpp::get_logger("laserMapping"),
+            "cannot auto-detect IMU units from median acceleration norm %.3f; "
+            "keep the sensor stationary or set common.imu_gyr_unit to 'deg' or 'rad'",
+            median_acc_norm);
+        imu_acc_norm_samples.clear();
+        return false;
+    }
+    imu_gyr_is_deg = median_acc_norm < 4.0;
+    imu_gyr_unit_resolved = true;
+    RCLCPP_INFO(rclcpp::get_logger("laserMapping"),
+        "auto-detected IMU units from median acceleration norm %.3f: "
+        "driver gyro output is %s; FAST-LIO2 will %s",
+        median_acc_norm, imu_gyr_is_deg ? "deg/s" : "rad/s",
+        imu_gyr_is_deg ? "convert it to rad/s" : "use it directly");
+    return true;
+}
+
+void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
+{
+    const auto integrity_raw_stamp=offline_handoff::stamp_ns(msg_in->header.stamp);
+    const auto integrity_id=input_integrity->record(IntegrityStage::ImuRaw,integrity_raw_stamp);
+    publish_count ++;
+    // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
+    sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
+    
+
+
+    if(frontend_input_config_v4.enabled)
+    {
+      frontend_init_v4::Sample raw;
+      raw.stamp_ns=static_cast<std::int64_t>(msg_in->header.stamp.sec)*1000000000LL+msg_in->header.stamp.nanosec;
+      raw.frame_id=msg_in->header.frame_id;raw.gyro_unit=frontend_input_config_v4.gyro_unit;raw.accel_unit=frontend_input_config_v4.accel_unit;
+      raw.acc={msg_in->linear_acceleration.x,msg_in->linear_acceleration.y,msg_in->linear_acceleration.z};
+      raw.gyro={msg_in->angular_velocity.x,msg_in->angular_velocity.y,msg_in->angular_velocity.z};
+      frontend_init_v4::Sample si;
+      try{si=frontend_input_adapter_v4->adapt(raw);}
+      catch(const std::invalid_argument &error)
+      {
+        input_integrity->record(IntegrityStage::ImuRejected,raw.stamp_ns,integrity_id);
+        p_imu->notify_frontend_input_rejection_v4();
+        if(async_input_trace_v4)enqueue_input_trace_v4(raw,nullptr,integrity_id);
+        else {
+        frontend_input_trace_v4 << "rejected," << raw.stamp_ns << ",," << raw.frame_id << ',' << raw.gyro_unit << ',' << raw.accel_unit << ",0,0";
+        for(const auto &v:{raw.acc,raw.gyro})for(double x:v)frontend_input_trace_v4 << ',' << x;
+        frontend_input_trace_v4 << ",,,,,," << std::endl;
+        }
+        RCLCPP_ERROR(rclcpp::get_logger("laserMapping"),"v4 IMU rejected: %s",error.what());return;
+      }
+      if(si.stamp_ns/1000000000LL>std::numeric_limits<std::int32_t>::max())
+      {input_integrity->record(IntegrityStage::ImuRejected,raw.stamp_ns,integrity_id);p_imu->notify_frontend_input_rejection_v4();RCLCPP_ERROR(rclcpp::get_logger("laserMapping"),"v4 aligned IMU stamp exceeds ROS sec range");return;}
+      msg->header.stamp.sec=static_cast<std::int32_t>(si.stamp_ns/1000000000LL);
+      msg->header.stamp.nanosec=static_cast<std::uint32_t>(si.stamp_ns%1000000000LL);
+      msg->linear_acceleration.x=si.acc[0];msg->linear_acceleration.y=si.acc[1];msg->linear_acceleration.z=si.acc[2];
+      msg->angular_velocity.x=si.gyro[0];msg->angular_velocity.y=si.gyro[1];msg->angular_velocity.z=si.gyro[2];
+      input_integrity->record(IntegrityStage::ImuAdapted,si.stamp_ns,integrity_id);
+      if(async_input_trace_v4)enqueue_input_trace_v4(raw,&si,integrity_id);
+      else {
+      frontend_input_trace_v4 << "adapted," << raw.stamp_ns << ',' << si.stamp_ns << ',' << raw.frame_id << ','
+        << raw.gyro_unit << ',' << raw.accel_unit << ',' << si.conversion_count << ',' << si.time_adjustment_count;
+      for(const auto &v:{raw.acc,raw.gyro,si.acc,si.gyro})for(double x:v)frontend_input_trace_v4 << ',' << x;
+      frontend_input_trace_v4 << std::endl;
+      if(!frontend_input_trace_v4)throw std::runtime_error("v4 input trace write failed");
+      input_integrity->record(IntegrityStage::ImuLogged,si.stamp_ns,integrity_id);
+      }
+      mtx_buffer.lock();
+    }
+    else
+    {
+    msg->header.stamp = get_ros_time(get_time_sec(msg_in->header.stamp) - time_diff_lidar_to_imu);
+    if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
+    {
+        msg->header.stamp = \
+        rclcpp::Time(timediff_lidar_wrt_imu + get_time_sec(msg_in->header.stamp));
+    }
+
+    const bool was_resolved = imu_gyr_unit_resolved;
+    resolve_imu_gyr_unit(*msg);
+
+    mtx_buffer.lock();
+    // Auto mode buffers IMU from the first message, but sync_packages() waits
+    // until the unit decision is available. Convert that buffered prefix once.
+    if (!was_resolved && imu_gyr_unit_resolved && imu_gyr_is_deg)
+    {
+        for (auto &buffered_msg : imu_buffer)
+        {
+            sensor_msgs::msg::Imu::SharedPtr converted(new sensor_msgs::msg::Imu(*buffered_msg));
+            converted->angular_velocity.x *= M_PI / 180.0;
+            converted->angular_velocity.y *= M_PI / 180.0;
+            converted->angular_velocity.z *= M_PI / 180.0;
+            buffered_msg = converted;
+        }
+    }
+
+    if (imu_gyr_unit_resolved && imu_gyr_is_deg)
+    {
+        msg->angular_velocity.x *= M_PI / 180.0;
+        msg->angular_velocity.y *= M_PI / 180.0;
+        msg->angular_velocity.z *= M_PI / 180.0;
+    }
+
+
+    }
+    const auto integrity_aligned_stamp=offline_handoff::stamp_ns(msg->header.stamp);
+    if(!frontend_input_config_v4.enabled)input_integrity->record(IntegrityStage::ImuAdapted,integrity_aligned_stamp,integrity_id);
+    double timestamp = get_time_sec(msg->header.stamp);
+    if (timestamp < last_timestamp_imu)
+    {
+        if(frontend_input_config_v4.enabled)p_imu->notify_frontend_input_rejection_v4();
+        std::cerr << "imu loop back, clear buffer" << std::endl;
+        imu_buffer.clear();
+        input_integrity->record(IntegrityStage::ImuCleared,integrity_aligned_stamp,integrity_id,0,integrity_imu_ids.size());integrity_imu_ids.clear();
+    }
+
+    last_timestamp_imu = timestamp;
+    imu_buffer.push_back(msg);
+    integrity_imu_ids.push_back(integrity_id);
+    input_integrity->record(IntegrityStage::ImuBuffered,integrity_aligned_stamp,integrity_id,0,imu_buffer.size(),lidar_buffer.size());
+    mtx_buffer.unlock();
+    sig_buffer.notify_all();
+}
+
+double lidar_mean_scantime = 0.0;
+int    scan_num = 0;
+bool sync_packages(MeasureGroup &meas)
+{
+    if (!imu_gyr_unit_resolved || lidar_buffer.empty() || imu_buffer.empty()) {
+        return false;
+    }
+
+    /*** push a lidar scan ***/
+    if(!lidar_pushed)
+    {
+        meas.lidar = lidar_buffer.front();
+        meas.lidar_beg_time = time_buffer.front();
+        if (meas.lidar->points.size() <= 1) // time too little
+        {
+            lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
+            std::cerr << "Too few input point cloud!\n";
+        }
+        else if (meas.lidar->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime)
+        {
+            lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
+        }
+        else
+        {
+            scan_num ++;
+            lidar_end_time = meas.lidar_beg_time + meas.lidar->points.back().curvature / double(1000);
+            lidar_mean_scantime += (meas.lidar->points.back().curvature / double(1000) - lidar_mean_scantime) / scan_num;
+        }
+
+        meas.lidar_end_time = lidar_end_time;
+
+        lidar_pushed = true;
+    }
+
+    if (last_timestamp_imu < lidar_end_time)
+    {
+        return false;
+    }
+
+    /*** push imu data, and pop from imu buffer ***/
+    ++integrity_group;
+    integrity_group_cloud_id=integrity_cloud_ids.front();integrity_group_cloud_stamp=integrity_cloud_stamps.front();
+    double imu_time = get_time_sec(imu_buffer.front()->header.stamp);
+    meas.imu.clear();
+    while ((!imu_buffer.empty()) && (imu_time < lidar_end_time))
+    {
+        imu_time = get_time_sec(imu_buffer.front()->header.stamp);
+        if(imu_time > lidar_end_time) break;
+        meas.imu.push_back(imu_buffer.front());
+        input_integrity->record(IntegrityStage::ImuSynced,offline_handoff::stamp_ns(imu_buffer.front()->header.stamp),integrity_imu_ids.front(),integrity_group);
+        integrity_imu_ids.pop_front();
+        imu_buffer.pop_front();
+    }
+
+    lidar_buffer.pop_front();
+    integrity_cloud_ids.pop_front();integrity_cloud_stamps.pop_front();
+    input_integrity->record(IntegrityStage::CloudSynced,integrity_group_cloud_stamp,integrity_group_cloud_id,integrity_group,lidar_buffer.size(),imu_buffer.size());
+    input_integrity->record(IntegrityStage::Group,integrity_group_cloud_stamp,integrity_group_cloud_id,integrity_group,
+      meas.imu.empty()?0:offline_handoff::stamp_ns(meas.imu.front()->header.stamp),meas.imu.empty()?0:offline_handoff::stamp_ns(meas.imu.back()->header.stamp));
+    time_buffer.pop_front();
+    lidar_pushed = false;
+    return true;
+}
+
+int process_increments = 0;
+void map_incremental()
+{
+    PointVector PointToAdd;
+    PointVector PointNoNeedDownsample;
+    PointToAdd.reserve(feats_down_size);
+    PointNoNeedDownsample.reserve(feats_down_size);
+    for (int i = 0; i < feats_down_size; i++)
+    {
+        /* transform to world frame */
+        pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
+        /* decide if need add to map */
+        if (!Nearest_Points[i].empty() && flg_EKF_inited)
+        {
+            const PointVector &points_near = Nearest_Points[i];
+            bool need_add = true;
+            BoxPointType Box_of_Point;
+            PointType downsample_result, mid_point; 
+            mid_point.x = floor(feats_down_world->points[i].x/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
+            mid_point.y = floor(feats_down_world->points[i].y/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
+            mid_point.z = floor(feats_down_world->points[i].z/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
+            float dist  = calc_dist(feats_down_world->points[i],mid_point);
+            if (fabs(points_near[0].x - mid_point.x) > 0.5 * filter_size_map_min && fabs(points_near[0].y - mid_point.y) > 0.5 * filter_size_map_min && fabs(points_near[0].z - mid_point.z) > 0.5 * filter_size_map_min){
+                PointNoNeedDownsample.push_back(feats_down_world->points[i]);
+                continue;
+            }
+            for (int readd_i = 0; readd_i < NUM_MATCH_POINTS; readd_i ++)
+            {
+                if (points_near.size() < NUM_MATCH_POINTS) break;
+                if (calc_dist(points_near[readd_i], mid_point) < dist)
+                {
+                    need_add = false;
+                    break;
+                }
+            }
+            if (need_add) PointToAdd.push_back(feats_down_world->points[i]);
+        }
+        else
+        {
+            PointToAdd.push_back(feats_down_world->points[i]);
+        }
+    }
+
+    double st_time = omp_get_wtime();
+    add_point_size = ikdtree.Add_Points(PointToAdd, true);
+    ikdtree.Add_Points(PointNoNeedDownsample, false); 
+    add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
+    kdtree_incremental_time = omp_get_wtime() - st_time;
+}
+
+PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI());
+PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
+void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull)
+{
+    if(scan_pub_en)
+    {
+        PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
+        int size = laserCloudFullRes->points.size();
+        PointCloudXYZI::Ptr laserCloudWorld( \
+                        new PointCloudXYZI(size, 1));
+
+        for (int i = 0; i < size; i++)
+        {
+            RGBpointBodyToWorld(&laserCloudFullRes->points[i], \
+                                &laserCloudWorld->points[i]);
+        }
+
+        sensor_msgs::msg::PointCloud2 laserCloudmsg;
+        pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
+        // laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
+        laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
+        laserCloudmsg.header.frame_id = "camera_init";
+        pubLaserCloudFull->publish(laserCloudmsg);
+        publish_count -= PUBFRAME_PERIOD;
+    }
+
+    /**************** save map ****************/
+    /* 1. make sure you have enough memories
+    /* 2. noted that pcd save will influence the real-time performences **/
+    if (pcd_save_en)
+    {
+        int size = feats_undistort->points.size();
+        PointCloudXYZI::Ptr laserCloudWorld( \
+                        new PointCloudXYZI(size, 1));
+
+        for (int i = 0; i < size; i++)
+        {
+            RGBpointBodyToWorld(&feats_undistort->points[i], \
+                                &laserCloudWorld->points[i]);
+        }
+        *pcl_wait_save += *laserCloudWorld;
+        pcd_save_dirty = true;
+
+        static int compact_wait_num = 0;
+        if (pcd_save_leaf_size > 0 && ++compact_wait_num >= 100)
+        {
+            compact_wait_num = 0;
+            pcl::VoxelGrid<PointType> save_filter;
+            save_filter.setLeafSize(pcd_save_leaf_size, pcd_save_leaf_size, pcd_save_leaf_size);
+            save_filter.setInputCloud(pcl_wait_save);
+            PointCloudXYZI::Ptr compacted(new PointCloudXYZI());
+            save_filter.filter(*compacted);
+            pcl_wait_save = compacted;
+        }
+
+        static int scan_wait_num = 0;
+        scan_wait_num ++;
+        if (pcl_wait_save->size() > 0 && pcd_save_interval > 0  && scan_wait_num >= pcd_save_interval)
+        {
+            pcd_index ++;
+            string all_points_dir(string(string(ROOT_DIR) + "PCD/scans_") + to_string(pcd_index) + string(".pcd"));
+            pcl::PCDWriter pcd_writer;
+            cout << "current scan saved to /PCD/" << all_points_dir << endl;
+            pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
+            pcl_wait_save->clear();
+            pcd_save_dirty = false;
+            scan_wait_num = 0;
+        }
+    }
+}
+
+void publish_frame_body(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_body)
+{
+    int size = feats_undistort->points.size();
+    PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI(size, 1));
+
+    for (int i = 0; i < size; i++)
+    {
+        RGBpointBodyLidarToIMU(&feats_undistort->points[i], \
+                            &laserCloudIMUBody->points[i]);
+    }
+
+    sensor_msgs::msg::PointCloud2 laserCloudmsg;
+    pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
+    laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
+    laserCloudmsg.header.frame_id = "body";
+    pubLaserCloudFull_body->publish(laserCloudmsg);
+    offline_handoff::event("frontend_cloud_publish_return",offline_handoff::stamp_ns(laserCloudmsg.header.stamp));
+    publish_count -= PUBFRAME_PERIOD;
+}
+
+void publish_effect_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudEffect)
+{
+    PointCloudXYZI::Ptr laserCloudWorld( \
+                    new PointCloudXYZI(effct_feat_num, 1));
+    for (int i = 0; i < effct_feat_num; i++)
+    {
+        RGBpointBodyToWorld(&laserCloudOri->points[i], \
+                            &laserCloudWorld->points[i]);
+    }
+    sensor_msgs::msg::PointCloud2 laserCloudFullRes3;
+    pcl::toROSMsg(*laserCloudWorld, laserCloudFullRes3);
+    laserCloudFullRes3.header.stamp = get_ros_time(lidar_end_time);
+    laserCloudFullRes3.header.frame_id = "camera_init";
+    pubLaserCloudEffect->publish(laserCloudFullRes3);
+}
+
+void publish_map(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudMap)
+{
+    PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
+    int size = laserCloudFullRes->points.size();
+    PointCloudXYZI::Ptr laserCloudWorld( \
+                    new PointCloudXYZI(size, 1));
+
+    for (int i = 0; i < size; i++)
+    {
+        RGBpointBodyToWorld(&laserCloudFullRes->points[i], \
+                            &laserCloudWorld->points[i]);
+    }
+    *pcl_wait_pub += *laserCloudWorld;
+
+    sensor_msgs::msg::PointCloud2 laserCloudmsg;
+    pcl::toROSMsg(*pcl_wait_pub, laserCloudmsg);
+    // laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
+    laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
+    laserCloudmsg.header.frame_id = "camera_init";
+    pubLaserCloudMap->publish(laserCloudmsg);
+
+    // sensor_msgs::msg::PointCloud2 laserCloudMap;
+    // pcl::toROSMsg(*featsFromMap, laserCloudMap);
+    // laserCloudMap.header.stamp = get_ros_time(lidar_end_time);
+    // laserCloudMap.header.frame_id = "camera_init";
+    // pubLaserCloudMap->publish(laserCloudMap);
+}
+
+// Save the accumulated point cloud buffer to disk.
+// Resolves the output path in this priority:
+//   1. `map_file_path` from yaml (absolute path used as-is; relative path joined with ROOT_DIR)
+//   2. fallback: <ROOT_DIR>/PCD/scans.pcd
+// Returns true on a successful write of a non-empty buffer.
+bool save_to_pcd(std::string & out_path)
+{
+    if (pcl_wait_save->empty()) {
+        out_path.clear();
+        return false;
+    }
+
+    if (!map_file_path.empty()) {
+        out_path = (map_file_path.front() == '/')
+                       ? map_file_path
+                       : std::string(ROOT_DIR) + map_file_path;
+    } else {
+        out_path = std::string(ROOT_DIR) + "PCD/scans.pcd";
+    }
+
+    if (pcd_save_leaf_size > 0)
+    {
+        pcl::VoxelGrid<PointType> save_filter;
+        save_filter.setLeafSize(pcd_save_leaf_size, pcd_save_leaf_size, pcd_save_leaf_size);
+        save_filter.setInputCloud(pcl_wait_save);
+        PointCloudXYZI::Ptr compacted(new PointCloudXYZI());
+        save_filter.filter(*compacted);
+        pcl_wait_save = compacted;
+    }
+
+    pcl::PCDWriter pcd_writer;
+    int ret = pcd_writer.writeBinary(out_path, *pcl_wait_save);
+    if (ret == 0) pcd_save_dirty = false;
+    return ret == 0;
+}
+
+template<typename T>
+void set_posestamp(T & out)
+{
+    out.pose.position.x = state_point.pos(0);
+    out.pose.position.y = state_point.pos(1);
+    out.pose.position.z = state_point.pos(2);
+    out.pose.orientation.x = geoQuat.x;
+    out.pose.orientation.y = geoQuat.y;
+    out.pose.orientation.z = geoQuat.z;
+    out.pose.orientation.w = geoQuat.w;
+    
+}
+
+void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped, std::unique_ptr<tf2_ros::TransformBroadcaster> & tf_br)
+{
+    odomAftMapped.header.frame_id = "camera_init";
+    odomAftMapped.child_frame_id = "body";
+    odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
+    set_posestamp(odomAftMapped.pose);
+    // Pose and covariance belong to the same completed lidar update. IKFoM
+    // begins [position_world, right_body_rotation]; ROS uses fixed world axes.
+    const auto covariance = kf.get_P();
+    odomAftMapped.pose.covariance = frontend_contract::pose_covariance_world(
+        covariance, state_point.rot.toRotationMatrix());
+    pubOdomAftMapped->publish(odomAftMapped);
+    offline_handoff::event("frontend_odom_publish_return",offline_handoff::stamp_ns(odomAftMapped.header.stamp));
+    if (tum_save_en && fout_tum)
+    {
+        fout_tum << std::fixed << std::setprecision(9) << lidar_end_time << " "
+                 << state_point.pos(0) << " " << state_point.pos(1) << " " << state_point.pos(2) << " "
+                 << geoQuat.x << " " << geoQuat.y << " " << geoQuat.z << " " << geoQuat.w << "\n";
+    }
+    geometry_msgs::msg::TransformStamped trans;
+    trans.header.frame_id = "camera_init";
+    trans.child_frame_id = "body";
+    trans.header.stamp = get_ros_time(lidar_end_time);
+    trans.transform.translation.x = odomAftMapped.pose.pose.position.x;
+    trans.transform.translation.y = odomAftMapped.pose.pose.position.y;
+    trans.transform.translation.z = odomAftMapped.pose.pose.position.z;
+    trans.transform.rotation.w = odomAftMapped.pose.pose.orientation.w;
+    trans.transform.rotation.x = odomAftMapped.pose.pose.orientation.x;
+    trans.transform.rotation.y = odomAftMapped.pose.pose.orientation.y;
+    trans.transform.rotation.z = odomAftMapped.pose.pose.orientation.z;
+    tf_br->sendTransform(trans);
+}
+
+void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath)
+{
+    set_posestamp(msg_body_pose);
+    msg_body_pose.header.stamp = get_ros_time(lidar_end_time); // ros::Time().fromSec(lidar_end_time);
+    msg_body_pose.header.frame_id = "camera_init";
+
+    /*** if path is too large, the rvis will crash ***/
+    static int jjj = 0;
+    jjj++;
+    if (jjj % 10 == 0) 
+    {
+        path.poses.push_back(msg_body_pose);
+        pubPath->publish(path);
+    }
+}
+
+void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data)
+{
+    double match_start = omp_get_wtime();
+    laserCloudOri->clear(); 
+    corr_normvect->clear(); 
+    total_residual = 0.0; 
+
+    /** closest surface search and residual computation **/
+    #ifdef MP_EN
+        omp_set_num_threads(MP_PROC_NUM);
+        #pragma omp parallel for
+    #endif
+    for (int i = 0; i < feats_down_size; i++)
+    {
+        PointType &point_body  = feats_down_body->points[i]; 
+        PointType &point_world = feats_down_world->points[i]; 
+
+        /* transform to world frame */
+        V3D p_body(point_body.x, point_body.y, point_body.z);
+        V3D p_global(s.rot * (s.offset_R_L_I*p_body + s.offset_T_L_I) + s.pos);
+        point_world.x = p_global(0);
+        point_world.y = p_global(1);
+        point_world.z = p_global(2);
+        point_world.intensity = point_body.intensity;
+
+        vector<float> pointSearchSqDis(NUM_MATCH_POINTS);
+
+        auto &points_near = Nearest_Points[i];
+
+        if (ekfom_data.converge)
+        {
+            /** Find the closest surfaces in the map **/
+            ikdtree.Nearest_Search(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
+            point_selected_surf[i] = points_near.size() < NUM_MATCH_POINTS ? false : pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5 ? false : true;
+        }
+
+        if (!point_selected_surf[i]) continue;
+
+        VF(4) pabcd;
+        point_selected_surf[i] = false;
+        if (esti_plane(pabcd, points_near, 0.1f))
+        {
+            float pd2 = pabcd(0) * point_world.x + pabcd(1) * point_world.y + pabcd(2) * point_world.z + pabcd(3);
+            float s = 1 - 0.9 * fabs(pd2) / sqrt(p_body.norm());
+
+            if (s > 0.9)
+            {
+                point_selected_surf[i] = true;
+                normvec->points[i].x = pabcd(0);
+                normvec->points[i].y = pabcd(1);
+                normvec->points[i].z = pabcd(2);
+                normvec->points[i].intensity = pd2;
+                res_last[i] = abs(pd2);
+            }
+        }
+    }
+    
+    effct_feat_num = 0;
+
+    for (int i = 0; i < feats_down_size; i++)
+    {
+        if (point_selected_surf[i])
+        {
+            laserCloudOri->points[effct_feat_num] = feats_down_body->points[i];
+            corr_normvect->points[effct_feat_num] = normvec->points[i];
+            total_residual += res_last[i];
+            effct_feat_num ++;
+        }
+    }
+
+    if (effct_feat_num < 1)
+    {
+        ekfom_data.valid = false;
+        std::cerr << "No Effective Points!" << std::endl;
+        // ROS_WARN("No Effective Points! \n");
+        return;
+    }
+
+    res_mean_last = total_residual / effct_feat_num;
+    match_time  += omp_get_wtime() - match_start;
+    double solve_start_  = omp_get_wtime();
+    
+    /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
+    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 12); //23
+    ekfom_data.h.resize(effct_feat_num);
+
+    for (int i = 0; i < effct_feat_num; i++)
+    {
+        const PointType &laser_p  = laserCloudOri->points[i];
+        V3D point_this_be(laser_p.x, laser_p.y, laser_p.z);
+        M3D point_be_crossmat;
+        point_be_crossmat << SKEW_SYM_MATRX(point_this_be);
+        V3D point_this = s.offset_R_L_I * point_this_be + s.offset_T_L_I;
+        M3D point_crossmat;
+        point_crossmat<<SKEW_SYM_MATRX(point_this);
+
+        /*** get the normal vector of closest surface/corner ***/
+        const PointType &norm_p = corr_normvect->points[i];
+        V3D norm_vec(norm_p.x, norm_p.y, norm_p.z);
+
+        /*** calculate the Measuremnt Jacobian matrix H ***/
+        V3D C(s.rot.conjugate() *norm_vec);
+        V3D A(point_crossmat * C);
+        if (extrinsic_est_en)
+        {
+            V3D B(point_be_crossmat * s.offset_R_L_I.conjugate() * C); //s.rot.conjugate()*norm_vec);
+            ekfom_data.h_x.block<1, 12>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), VEC_FROM_ARRAY(B), VEC_FROM_ARRAY(C);
+        }
+        else
+        {
+            ekfom_data.h_x.block<1, 12>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
+        }
+
+        /*** Measuremnt: distance to the closest surface/corner ***/
+        ekfom_data.h(i) = -norm_p.intensity;
+    }
+    solve_time += omp_get_wtime() - solve_start_;
+}
+
+class LaserMappingNode : public rclcpp::Node
+{
+public:
+    LaserMappingNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions()) : Node("laser_mapping", options),
+      required_observer_name_(offline_handoff::required_observer_name())
+    {
+        offline_bag_=this->declare_parameter<std::string>("offline.consume_bag","");
+        offline_max_seconds_=this->declare_parameter<double>("offline.maximum_input_seconds",0.0);
+        const auto offline_output=this->declare_parameter<std::string>("offline.output","");
+        if(!offline_bag_.empty()){
+          const auto env=[](const char*key){const char*v=std::getenv(key);return std::string(v?v:"");};
+          if(!offline_consume::isolated(env("A2W_FIELD_MODE"),env("ROS_DOMAIN_ID"),env("ROS_LOCALHOST_ONLY"))||offline_output.empty()||offline_max_seconds_<0)
+            throw std::invalid_argument("sequential input requires explicit isolated offline mode and fresh output");
+          offline_consume::output=std::make_unique<offline_consume::Output>(offline_output,this->declare_parameter<double>("offline.preprocess_export_seconds",60.));
+        }
+        this->declare_parameter<bool>("publish.path_en", true);
+        this->declare_parameter<bool>("publish.effect_map_en", false);
+        this->declare_parameter<bool>("publish.map_en", false);
+        this->declare_parameter<bool>("publish.scan_publish_en", true);
+        this->declare_parameter<bool>("publish.dense_publish_en", true);
+        this->declare_parameter<bool>("publish.scan_bodyframe_pub_en", true);
+        this->declare_parameter<int>("max_iteration", 4);
+        this->declare_parameter<string>("map_file_path", "");
+        this->declare_parameter<string>("common.lid_topic", "/lidar_points");
+        this->declare_parameter<string>("common.imu_topic", "/lidar_imu");
+        this->declare_parameter<bool>("common.time_sync_en", false);
+        this->declare_parameter<double>("common.time_offset_lidar_to_imu", 0.0);
+        this->declare_parameter<double>("filter_size_corner", 0.5);
+        this->declare_parameter<double>("filter_size_surf", 0.5);
+        this->declare_parameter<double>("filter_size_map", 0.5);
+        this->declare_parameter<double>("cube_side_length", 200.);
+        this->declare_parameter<float>("mapping.det_range", 300.);
+        this->declare_parameter<double>("mapping.fov_degree", 180.);
+        this->declare_parameter<double>("mapping.gyr_cov", 0.1);
+        this->declare_parameter<double>("mapping.acc_cov", 0.1);
+        this->declare_parameter<double>("mapping.b_gyr_cov", 0.0001);
+        this->declare_parameter<double>("mapping.b_acc_cov", 0.0001);
+        this->declare_parameter<double>("preprocess.blind", 0.01);
+        this->declare_parameter<int>("preprocess.lidar_type", JT16);
+        this->declare_parameter<string>("common.imu_gyr_unit", "auto");
+        this->declare_parameter<int>("preprocess.scan_line", 16);
+        this->declare_parameter<int>("preprocess.timestamp_unit", US);
+        this->declare_parameter<int>("preprocess.scan_rate", 10);
+        this->declare_parameter<int>("point_filter_num", 2);
+        this->declare_parameter<bool>("feature_extract_enable", false);
+        this->declare_parameter<bool>("runtime_pos_log_enable", false);
+        this->declare_parameter<bool>("mapping.extrinsic_est_en", true);
+        this->declare_parameter<bool>("pcd_save.pcd_save_en", false);
+        this->declare_parameter<int>("pcd_save.interval", -1);
+        this->declare_parameter<double>("pcd_save.leaf_size", 0.0);
+        this->declare_parameter<bool>("trajectory_save.tum_en", false);
+        this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
+        this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
+
+
+        this->get_parameter_or<bool>("publish.path_en", path_en, true);
+        this->get_parameter_or<bool>("publish.effect_map_en", effect_pub_en, false);
+        this->get_parameter_or<bool>("publish.map_en", map_pub_en, false);
+        this->get_parameter_or<bool>("publish.scan_publish_en", scan_pub_en, true);
+        this->get_parameter_or<bool>("publish.dense_publish_en", dense_pub_en, true);
+        this->get_parameter_or<bool>("publish.scan_bodyframe_pub_en", scan_body_pub_en, true);
+        this->get_parameter_or<int>("max_iteration", NUM_MAX_ITERATIONS, 4);
+        this->get_parameter_or<string>("map_file_path", map_file_path, "");
+        this->get_parameter_or<string>("common.lid_topic", lid_topic, "/lidar_points");
+        this->get_parameter_or<string>("common.imu_topic", imu_topic, "/lidar_imu");
+        this->get_parameter_or<bool>("common.time_sync_en", time_sync_en, false);
+        this->get_parameter_or<double>("common.time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
+        this->get_parameter_or<double>("filter_size_corner",filter_size_corner_min,0.5);
+        this->get_parameter_or<double>("filter_size_surf",filter_size_surf_min,0.5);
+        this->get_parameter_or<double>("filter_size_map",filter_size_map_min,0.5);
+        this->get_parameter_or<double>("cube_side_length",cube_len,200.f);
+        this->get_parameter_or<float>("mapping.det_range",DET_RANGE,300.f);
+        this->get_parameter_or<double>("mapping.fov_degree",fov_deg,180.f);
+        this->get_parameter_or<double>("mapping.gyr_cov",gyr_cov,0.1);
+        this->get_parameter_or<double>("mapping.acc_cov",acc_cov,0.1);
+        this->get_parameter_or<double>("mapping.b_gyr_cov",b_gyr_cov,0.0001);
+        this->get_parameter_or<double>("mapping.b_acc_cov",b_acc_cov,0.0001);
+        this->get_parameter_or<double>("preprocess.blind", p_pre->blind, 0.01);
+        this->get_parameter_or<int>("preprocess.lidar_type", p_pre->lidar_type, JT16);
+
+        this->get_parameter_or<string>("common.imu_gyr_unit", imu_gyr_unit_mode, "auto");
+        if (imu_gyr_unit_mode == "deg")
+        {
+            imu_gyr_is_deg = true;
+            imu_gyr_unit_resolved = true;
+        }
+        else if (imu_gyr_unit_mode == "rad")
+        {
+            imu_gyr_is_deg = false;
+            imu_gyr_unit_resolved = true;
+        }
+        else if (imu_gyr_unit_mode != "auto")
+        {
+            RCLCPP_WARN(this->get_logger(),
+                "common.imu_gyr_unit must be 'auto', 'deg', or 'rad' (got '%s'); using auto",
+                imu_gyr_unit_mode.c_str());
+            imu_gyr_unit_mode = "auto";
+        }
+
+        // Default-off experimental contract. No numeric inference of corrected
+        // driver units; all claims require explicit source evidence.
+        frontend_input_config_v4.enabled=this->declare_parameter<bool>("frontend_init_v4.input_interface_enabled",false);
+        frontend_input_config_v4.gyro_unit=this->declare_parameter<string>("frontend_init_v4.input_gyro_unit","unknown");
+        frontend_input_config_v4.accel_unit=this->declare_parameter<string>("frontend_init_v4.input_accel_unit","unknown");
+        frontend_input_config_v4.frame_id=this->declare_parameter<string>("frontend_init_v4.input_imu_frame","unknown");
+        frontend_input_config_v4.gyro_evidence=this->declare_parameter<string>("frontend_init_v4.gyro_unit_evidence","");
+        frontend_input_config_v4.accel_evidence=this->declare_parameter<string>("frontend_init_v4.accel_unit_evidence","");
+        frontend_input_config_v4.time_evidence=this->declare_parameter<string>("frontend_init_v4.time_offset_evidence","");
+        frontend_input_config_v4.source_provenance=this->declare_parameter<string>("frontend_init_v4.source_provenance","unknown");
+        const bool async_input_csv=this->declare_parameter<bool>("frontend_init_v4.async_input_trace",false);
+        const auto input_csv_capacity=this->declare_parameter<int>("frontend_init_v4.input_trace_queue_capacity",4096);
+        if(async_input_csv&&(!frontend_input_config_v4.enabled||input_csv_capacity<=0||input_csv_capacity>1048576))
+          throw std::invalid_argument("async input CSV requires enabled v4 interface and capacity [1,1048576]");
+        input_integrity->set_input_csv_mode(frontend_input_config_v4.enabled?(async_input_csv?"async_spsc_bounded_flush_worker":"legacy_sync_endl"):"disabled");
+        if(frontend_input_config_v4.enabled)
+        {
+          if(!std::isfinite(time_diff_lidar_to_imu)||std::abs(time_diff_lidar_to_imu)>1e6)
+            throw std::invalid_argument("invalid v4 fixed offset range");
+          frontend_input_config_v4.imu_minus_lidar_offset_ns=std::llround(time_diff_lidar_to_imu*1e9);
+          if(frontend_input_config_v4.source_provenance!="synthetic"&&frontend_input_config_v4.source_provenance!="real")
+            throw std::invalid_argument("v4 source_provenance must explicitly be synthetic or real");
+          frontend_input_adapter_v4.reset(new frontend_init_v4::InputAdapter(frontend_input_config_v4));
+          const string legacy_mode=frontend_input_config_v4.gyro_unit=="rad/s"?"rad":"deg";
+          if(imu_gyr_unit_mode!=legacy_mode||time_sync_en)
+            throw std::invalid_argument("v4 explicit gyro mode mismatch or second time synchronization enabled");
+          // Converted messages are SI; never run the legacy conversion again.
+          imu_gyr_is_deg=false;imu_gyr_unit_resolved=true;
+          const auto path=this->declare_parameter<string>("frontend_init_v4.input_trace_path",DEBUG_FILE_DIR("input_interface_v4.csv"));
+          if(std::ifstream(path).good())throw std::invalid_argument("v4 input trace exists; refusing overwrite");
+          if(async_input_csv){
+            auto* trace=input_integrity.get();
+            async_input_trace_v4=std::make_unique<frontend_input_csv::AsyncWriter>(
+              frontend_input_csv::Config{path,static_cast<std::size_t>(input_csv_capacity)},
+              [trace](const frontend_input_csv::Row& row){
+                if(row.adapted)trace->record(IntegrityStage::ImuLogged,row.aligned_stamp_ns,row.callback_id);
+              });
+          }else{
+          frontend_input_trace_v4.open(path);
+          if(!frontend_input_trace_v4)throw std::runtime_error("cannot open v4 input trace");
+          frontend_input_trace_v4 << std::setprecision(17)
+            << "status,raw_stamp_ns,aligned_stamp_ns,input_frame,source_gyro_unit,source_accel_unit,conversion_count,time_adjustment_count,raw_ax,raw_ay,raw_az,raw_gx,raw_gy,raw_gz,si_ax,si_ay,si_az,si_gx,si_gy,si_gz\n";
+          }
+          RCLCPP_INFO(this->get_logger(),"v4 source gyro=%s [%s] acc=%s [%s] offset=t_IMU_raw-t_LiDAR %.9f s applied ONCE by subtraction [%s]; axes unchanged; internal9.81/mean_acc scaling remains",
+            frontend_input_config_v4.gyro_unit.c_str(),frontend_input_config_v4.gyro_evidence.c_str(),
+            frontend_input_config_v4.accel_unit.c_str(),frontend_input_config_v4.accel_evidence.c_str(),
+            time_diff_lidar_to_imu,frontend_input_config_v4.time_evidence.c_str());
+        }
+        frontend_init_v4::GateConfig v4_gate;
+        v4_gate.enabled=this->declare_parameter<bool>("frontend_init_v4.quality_gate_enabled",false);
+        const int v4_min_samples=this->declare_parameter<int>("frontend_init_v4.minimum_samples",200);
+        if(v4_min_samples<2)throw std::invalid_argument("v4 minimum_samples must be>=2");
+        v4_gate.minimum_samples=static_cast<std::size_t>(v4_min_samples);
+        v4_gate.minimum_duration_s=this->declare_parameter<double>("frontend_init_v4.minimum_duration_s",1.);
+        v4_gate.maximum_gap_s=this->declare_parameter<double>("frontend_init_v4.maximum_gap_s",.02);
+        v4_gate.maximum_gyro_norm_rad_s=this->declare_parameter<double>("frontend_init_v4.maximum_gyro_norm_rad_s",.05);
+        v4_gate.maximum_mean_gyro_norm_rad_s=this->declare_parameter<double>("frontend_init_v4.maximum_mean_gyro_norm_rad_s",.02);
+        v4_gate.gyro_variance_limit=this->declare_parameter<double>("frontend_init_v4.gyro_variance_limit",1e-5);
+        v4_gate.accel_variance_limit=this->declare_parameter<double>("frontend_init_v4.accel_variance_limit",.04);
+        v4_gate.minimum_accel_norm_m_s2=this->declare_parameter<double>("frontend_init_v4.minimum_accel_norm_m_s2",9.);
+        v4_gate.maximum_accel_norm_m_s2=this->declare_parameter<double>("frontend_init_v4.maximum_accel_norm_m_s2",10.6);
+        v4_gate.maximum_direction_change_rad=this->declare_parameter<double>("frontend_init_v4.maximum_direction_change_rad",.02);
+        const auto v4_trace=this->declare_parameter<string>("frontend_init_v4.quality_trace_path",DEBUG_FILE_DIR("init_quality_v4.csv"));
+
+        frontend_init_v4::StateGuardConfig v4_state;
+        v4_state.quaternion_norm_tolerance=this->declare_parameter<double>("frontend_init_v4.state_quaternion_norm_tolerance",1e-6);
+        v4_state.rotation_orthogonality_tolerance=this->declare_parameter<double>("frontend_init_v4.state_rotation_orthogonality_tolerance",1e-6);
+        v4_state.rotation_determinant_tolerance=this->declare_parameter<double>("frontend_init_v4.state_rotation_determinant_tolerance",1e-6);
+        v4_state.initial_rotation_identity_tolerance=this->declare_parameter<double>("frontend_init_v4.state_initial_rotation_identity_tolerance",1e-8);
+        v4_state.covariance_symmetry_tolerance=this->declare_parameter<double>("frontend_init_v4.state_covariance_symmetry_tolerance",1e-10);
+        v4_state.minimum_covariance_pivot=this->declare_parameter<double>("frontend_init_v4.state_minimum_covariance_pivot",0.);
+        v4_state.maximum_mean_accel_residual_m_s2=this->declare_parameter<double>("frontend_init_v4.state_maximum_mean_accel_residual_m_s2",.05);
+        v4_state.maximum_last_accel_residual_m_s2=this->declare_parameter<double>("frontend_init_v4.state_maximum_last_accel_residual_m_s2",.25);
+        v4_state.gravity_norm_tolerance_m_s2=this->declare_parameter<double>("frontend_init_v4.state_gravity_norm_tolerance_m_s2",1e-6);
+        v4_state.candidate_preservation_tolerance=this->declare_parameter<double>("frontend_init_v4.state_candidate_preservation_tolerance",1e-12);
+
+        p_imu->set_frontend_init_v4(v4_gate,frontend_input_config_v4,v4_trace,v4_state);
+        const auto joint_enabled=this->declare_parameter<bool>("frontend_init_v4.joint_initialization_enabled",false);
+        const auto joint_path=this->declare_parameter<std::string>("frontend_init_v4.joint_candidate_path","");
+
+
+        frontend_runtime_v4::Config runtime_state_config_v4;
+        runtime_strict_gate_v4_=v4_gate.enabled;
+        runtime_state_log_enabled_v4_=this->declare_parameter<bool>("frontend_init_v4.runtime_state_log_enabled",false);
+        runtime_state_config_v4.enabled=runtime_state_log_enabled_v4_;
+        runtime_state_config_v4.path=this->declare_parameter<string>("frontend_init_v4.runtime_state_log_path","");
+        const auto runtime_state_capacity_v4=this->declare_parameter<int>("frontend_init_v4.runtime_state_log_capacity",1024);
+        if(runtime_state_log_enabled_v4_ && runtime_state_capacity_v4<=0)
+          throw std::invalid_argument("runtime state log capacity must be positive");
+        runtime_state_config_v4.capacity=static_cast<std::size_t>(runtime_state_capacity_v4);
+        runtime_state_config_v4.source_provenance=frontend_input_config_v4.source_provenance;
+        if(runtime_state_log_enabled_v4_)
+          runtime_state_writer_v4_=std::make_unique<frontend_runtime_v4::Writer>(runtime_state_config_v4);
+
+
+        this->get_parameter_or<int>("preprocess.scan_line", p_pre->N_SCANS, 16);
+        this->get_parameter_or<int>("preprocess.timestamp_unit", p_pre->time_unit, US);
+        this->get_parameter_or<int>("preprocess.scan_rate", p_pre->SCAN_RATE, 10);
+        this->get_parameter_or<int>("point_filter_num", p_pre->point_filter_num, 2);
+        this->get_parameter_or<bool>("feature_extract_enable", p_pre->feature_enabled, false);
+        this->get_parameter_or<bool>("runtime_pos_log_enable", runtime_pos_log, 0);
+        if (runtime_pos_log)
+        {
+            T1.resize(MAXN); s_plot.resize(MAXN); s_plot2.resize(MAXN); s_plot3.resize(MAXN);
+            s_plot4.resize(MAXN); s_plot5.resize(MAXN); s_plot6.resize(MAXN); s_plot7.resize(MAXN);
+            s_plot8.resize(MAXN); s_plot9.resize(MAXN); s_plot10.resize(MAXN); s_plot11.resize(MAXN);
+        }
+        this->get_parameter_or<bool>("mapping.extrinsic_est_en", extrinsic_est_en, true);
+        this->get_parameter_or<bool>("pcd_save.pcd_save_en", pcd_save_en, false);
+        this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
+        this->get_parameter_or<double>("pcd_save.leaf_size", pcd_save_leaf_size, 0.0);
+        this->get_parameter_or<bool>("trajectory_save.tum_en", tum_save_en, false);
+        if (tum_save_en)
+        {
+            fout_tum.open(DEBUG_FILE_DIR("traj_tum.txt"), ios::out);
+            if (!fout_tum)
+                RCLCPP_WARN(this->get_logger(), "cannot open %s for TUM trajectory export", DEBUG_FILE_DIR("traj_tum.txt").c_str());
+        }
+        this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
+        this->get_parameter_or<vector<double>>("mapping.extrinsic_R", extrinR, vector<double>());
+
+        RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
+        if (time_sync_en)
+        {
+            RCLCPP_WARN(this->get_logger(), "common.time_sync_en has no effect in this build; "
+                        "use common.time_offset_lidar_to_imu to compensate a fixed lidar-IMU time offset.");
+        }
+        RCLCPP_INFO(this->get_logger(),
+            "config summary: lid_topic=%s imu_topic=%s lidar_type=%d scan_line=%d "
+            "timestamp_unit=%d blind=%.2f det_range=%.1f imu_gyr_unit=%s "
+            "time_offset_lidar_to_imu=%.4f extrinsic_est_en=%d | "
+            "pcd_save_en=%d interval=%d leaf_size=%.2f map_file_path='%s' tum_en=%d",
+            lid_topic.c_str(), imu_topic.c_str(), p_pre->lidar_type, p_pre->N_SCANS,
+            p_pre->time_unit, p_pre->blind, DET_RANGE, imu_gyr_unit_mode.c_str(),
+            time_diff_lidar_to_imu, (int)extrinsic_est_en,
+            (int)pcd_save_en, pcd_save_interval, pcd_save_leaf_size, map_file_path.c_str(), (int)tum_save_en);
+
+        path.header.stamp = this->get_clock()->now();
+        path.header.frame_id ="camera_init";
+
+        // /*** variables definition ***/
+        // int effect_feat_num = 0, frame_num = 0;
+        // double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
+        // bool flg_EKF_converged, EKF_stop_flg = 0;
+
+        FOV_DEG = (fov_deg + 10.0) > 179.9 ? 179.9 : (fov_deg + 10.0);
+        HALF_FOV_COS = cos((FOV_DEG) * 0.5 * PI_M / 180.0);
+
+        _featsArray.reset(new PointCloudXYZI());
+
+        memset(point_selected_surf, true, sizeof(point_selected_surf));
+        memset(res_last, -1000.0f, sizeof(res_last));
+        downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
+        downSizeFilterMap.setLeafSize(filter_size_map_min, filter_size_map_min, filter_size_map_min);
+        memset(point_selected_surf, true, sizeof(point_selected_surf));
+        memset(res_last, -1000.0f, sizeof(res_last));
+
+        Lidar_T_wrt_IMU<<VEC_FROM_ARRAY(extrinT);
+        Lidar_R_wrt_IMU<<MAT_FROM_ARRAY(extrinR);
+        p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
+        if(joint_enabled){
+          if(!offline_consume::output||!v4_gate.enabled||extrinsic_est_en||joint_path.empty()||time_diff_lidar_to_imu!=0.||frontend_input_config_v4.imu_minus_lidar_offset_ns!=0||
+             (Lidar_R_wrt_IMU-M3D::Identity()).norm()>1e-12||(Lidar_T_wrt_IMU-V3D(-.00862,.00914,.03916)).norm()>1e-12)throw std::invalid_argument("joint mode requires isolated sequential input, fixed extrinsic and existing input gate");
+          p_imu->configure_joint(joint_path,(offline_consume::output->root/"joint_initialization_receipt.json").string());
+        }
+        p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));
+        p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov));
+        p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
+        p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
+
+        fill(epsi, epsi+23, 0.001);
+        kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
+
+        /*** debug record (only when runtime_pos_log_enable) ***/
+        if (runtime_pos_log)
+        {
+            string pos_log_dir = root_dir + "/Log/pos_log.txt";
+            fp = fopen(pos_log_dir.c_str(),"w");
+
+            fout_pre.open(DEBUG_FILE_DIR("mat_pre.txt"),ios::out);
+            fout_out.open(DEBUG_FILE_DIR("mat_out.txt"),ios::out);
+            fout_dbg.open(DEBUG_FILE_DIR("dbg.txt"),ios::out);
+            if (fout_pre && fout_out)
+                cout << "~~~~"<<ROOT_DIR<<" file opened" << endl;
+            else
+                cout << "~~~~"<<ROOT_DIR<<" doesn't exist" << endl;
+        }
+
+        /*** ROS subscribe initialization ***/
+
+
+        // Direct consumption has no DDS input/output. It uses the same callbacks,
+        // synchronizer and timer body; the live identity handshake stays intact.
+        if(!offline_bag_.empty()){frontend_lifecycle.run();return;}
+        pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
+        pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
+        pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 20);
+        pubLaserCloudMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/Laser_map", 20);
+        pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
+        pubPath_ = this->create_publisher<nav_msgs::msg::Path>("/path", 20);
+        tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+
+        //------------------------------------------------------------------------------------------------------
+        auto period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 100.0));
+        timer_ = rclcpp::create_timer(this, this->get_clock(), period_ms, [this] {
+          run_guarded("mapping_timer", [this] {timer_callback();});
+        });
+
+        auto map_period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0));
+        map_pub_timer_ = rclcpp::create_timer(this, this->get_clock(), map_period_ms, [this] {
+          run_guarded("map_publish", [this] {map_publish_callback();});
+        });
+
+        map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", [this](
+          std_srvs::srv::Trigger::Request::ConstSharedPtr req, std_srvs::srv::Trigger::Response::SharedPtr res) {
+          res->success=false;res->message="frontend is stopping or callback failed";
+          run_guarded("map_save", [this,&req,&res] {map_save_callback(req,res);});
+        });
+
+        handoff_timer_ = this->create_wall_timer(std::chrono::milliseconds(100), [this] {
+          run_guarded("endpoint_monitor", [this] {require_output_edges();input_integrity->status(integrity_snapshot());});
+        });
+        // Live source continues recording; do not create sensor subscriptions until all output edges match.
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(45);
+        bool field_released=false;
+        while(rclcpp::ok()&&!stop_signal&&std::chrono::steady_clock::now()<deadline) {
+          bool matched=offline_handoff::report_ready("frontend",{
+            offline_handoff::edge(*this,pubOdomAftMapped_,"/Odometry",{"/mapping_ingress_node",required_observer_name_,"/rosbag2_recorder"}),
+            offline_handoff::edge(*this,pubLaserCloudFull_body_,"/cloud_registered_body",{"/mapping_ingress_node",required_observer_name_})});
+          if(matched&&std::filesystem::exists(offline_handoff::trace->directory()/"live_release.json")){field_released=true;break;}
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        observe_stop_request();
+        if(stop_signal)return;
+        if(!field_released)throw std::runtime_error("live startup endpoint handshake timeout; no sensor intake started");
+        offline_handoff::event("live_sensor_intake_release",0);
+        const int field_depth=this->declare_parameter<int>("field_capture.imu_depth",100);
+        if(field_depth!=100)throw std::invalid_argument("field IMU depth must be 100");
+        sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), [this](sensor_msgs::msg::PointCloud2::UniquePtr message) {
+          run_guarded("lidar_input", [&message] {standard_pcl_cbk(std::move(message));});
+        });
+        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, rclcpp::SensorDataQoS().keep_last(field_depth), [this](sensor_msgs::msg::Imu::UniquePtr message) {
+          run_guarded("imu_input", [&message] {imu_cbk(std::move(message));});
+        });
+        frontend_lifecycle.run();
+        RCLCPP_INFO(this->get_logger(), "Node init finished.");
+    }
+
+    ~LaserMappingNode()
+    {
+        close_traces();
+        fout_out.close();
+        fout_pre.close();
+        if (fp) fclose(fp);
+    }
+
+    void stop_new_tasks()
+    {
+        frontend_lifecycle.request_stop("executor_stopped");
+        if(timer_)timer_->cancel();
+        if(map_pub_timer_)map_pub_timer_->cancel();
+        if(handoff_timer_)handoff_timer_->cancel();
+        sub_pcl_pc_.reset();sub_imu_.reset();map_save_srv_.reset();
+    }
+
+    void close_traces() noexcept
+    {
+        if(runtime_state_writer_v4_)runtime_state_writer_v4_->close();
+        close_input_trace_v4();
+    }
+
+    bool runtime_trace_enabled()const{return runtime_state_log_enabled_v4_;}
+    bool consumes_bag()const{return !offline_bag_.empty();}
+    void run_consumption(){
+        rosbag2_cpp::Reader reader;reader.open(offline_bag_);
+        std::uint64_t imus=0,clouds=0;std::int64_t first_record=0;
+        rclcpp::Serialization<sensor_msgs::msg::Imu> imu_serial;
+        rclcpp::Serialization<sensor_msgs::msg::PointCloud2> cloud_serial;
+        while(reader.has_next()){
+          if(stop_signal)throw std::runtime_error("offline consumption interrupted");
+          auto record=reader.read_next();
+          if(!first_record)first_record=record->time_stamp;
+          if(offline_max_seconds_>0&&(record->time_stamp-first_record)*1e-9>offline_max_seconds_)break;
+          if(record->topic_name!=imu_topic&&record->topic_name!=lid_topic)continue;
+          rclcpp::SerializedMessage serialized(*record->serialized_data);
+          if(record->topic_name==imu_topic){
+            auto msg=std::make_unique<sensor_msgs::msg::Imu>();imu_serial.deserialize_message(&serialized,msg.get());
+            offline_consume::output->input<<record->topic_name<<','<<imus++<<','<<record->time_stamp<<','<<offline_handoff::stamp_ns(msg->header.stamp)<<'\n';
+            imu_cbk(std::move(msg));
+          }else{
+            auto msg=std::make_unique<sensor_msgs::msg::PointCloud2>();cloud_serial.deserialize_message(&serialized,msg.get());
+            offline_consume::output->input<<record->topic_name<<','<<clouds++<<','<<record->time_stamp<<','<<offline_handoff::stamp_ns(msg->header.stamp)<<'\n';
+            standard_pcl_cbk(std::move(msg));
+          }
+          // The producer does not advance until every currently coverable scan
+          // finishes its existing synchronization, propagation and lidar update.
+          while(!lidar_buffer.empty()){
+            const auto before=lidar_buffer.size();timer_callback();
+            if(lidar_buffer.size()==before)break;
+          }
+          input_integrity->status(integrity_snapshot());
+        }
+        offline_consume::output->close();
+        std::ofstream summary(offline_consume::output->root/"consumption_summary.json");
+        summary<<"{\"mode\":\"sequential_algorithm_input_not_realtime\",\"imu\":"<<imus<<",\"cloud\":"<<clouds
+          <<",\"post\":"<<offline_consume::output->posts<<",\"pending_cloud\":"<<lidar_buffer.size()<<",\"terminal_imu\":"<<imu_buffer.size()
+          <<",\"full_requested\":"<<(offline_max_seconds_==0?"true":"false")<<",\"exact_expected_source_counts\":"<<(offline_consume::full_counts(imus,clouds)?"true":"false")<<"}\n";
+        summary.close();if(!summary)throw std::runtime_error("consumption summary write failed");
+        if(offline_max_seconds_==0&&!offline_consume::full_counts(imus,clouds))throw std::runtime_error("full original source counts differ");
+        if(!lidar_buffer.empty())throw std::runtime_error("source ended with an IMU-uncovered cloud; not fabricated");
+        frontend_lifecycle.request_stop("offline_consumption_eof");
+    }
+    bool runtime_trace_closed()const{return !runtime_state_writer_v4_||runtime_state_writer_v4_->stats().closed;}
+    bool runtime_trace_flush_ok()const{
+        if(!runtime_state_writer_v4_)return true;
+        const auto stats=runtime_state_writer_v4_->stats();
+        return stats.flush_ok&&stats.dropped==0&&stats.write_errors==0&&stats.enqueued==stats.written;
+    }
+
+private:
+    template<class Callback> void run_guarded(const char* label,Callback callback) noexcept
+    {
+        observe_stop_request();
+        if(!frontend_lifecycle.accepts_work())return;
+        try {
+            if(async_input_trace_v4){const auto stats=async_input_trace_v4->stats();
+              if(stats.overflow||stats.io_errors)throw std::runtime_error("async input trace overflow/write failure");}
+            callback();
+        }
+        catch(const std::exception& error) {
+            frontend_lifecycle.fail(std::string(label)+": "+error.what());
+            RCLCPP_ERROR(this->get_logger(),"frontend callback failed: %s",frontend_lifecycle.error().c_str());
+        }
+        catch(...) {
+            frontend_lifecycle.fail(std::string(label)+": unknown exception");
+            RCLCPP_ERROR(this->get_logger(),"frontend callback failed: unknown exception");
+        }
+    }
+
+    void require_output_edges()
+    {
+        observe_stop_request();
+        if(!frontend_lifecycle.accepts_work())return;
+        const auto odom=offline_handoff::edge(*this,pubOdomAftMapped_,"/Odometry",
+          {"/mapping_ingress_node",required_observer_name_,"/rosbag2_recorder"});
+        const auto cloud=offline_handoff::edge(*this,pubLaserCloudFull_body_,"/cloud_registered_body",
+          {"/mapping_ingress_node",required_observer_name_});
+        const bool ready=offline_handoff::report_ready("frontend",{odom,cloud});
+        observe_stop_request();
+        frontend_lifecycle.require_outputs(ready,"required output endpoint identity missing or ambiguous while RUNNING; inspect frontend_matched.json");
+    }
+
+    void timer_callback()
+    {
+        if(sync_packages(Measures))
+        {
+            IntegrityComputeScope integrity_compute_scope;
+            if (flg_first_scan)
+            {
+                first_lidar_time = Measures.lidar_beg_time;
+                p_imu->first_lidar_time = first_lidar_time;
+                flg_first_scan = false;
+                input_integrity->record(IntegrityStage::FirstScan,integrity_group_cloud_stamp,integrity_group_cloud_id,integrity_group);
+                return;
+            }
+
+            double t0,t1,t2,t3,t4,t5,match_start, solve_start, svd_time;
+
+            match_time = 0;
+            kdtree_search_time = 0.0;
+            solve_time = 0;
+            solve_const_H_time = 0;
+            svd_time   = 0;
+            t0 = omp_get_wtime();
+
+
+            const bool runtime_was_initialized_v4=runtime_state_log_enabled_v4_ ? p_imu->frontend_init_v4_initialized() : true;
+            if(offline_consume::output)offline_consume::output->stage("PRE_PROPAGATION",integrity_group_cloud_id-1,integrity_group_cloud_stamp,Measures.lidar_beg_time,Measures.lidar_end_time,
+              Measures.imu.empty()?0:offline_handoff::stamp_ns(Measures.imu.back()->header.stamp),kf.get_x(),p_imu->acceleration_scale(),p_imu->normalization_mean(),std::llround(p_imu->state_time()*1e9));
+            if(offline_consume::output)p_imu->joint_context(integrity_group_cloud_id-1,integrity_group_cloud_stamp,imu_buffer.empty()?nullptr:imu_buffer.front());
+            p_imu->Process(Measures, kf, feats_undistort);
+            state_point = kf.get_x();
+            if(offline_consume::output)offline_consume::output->stage(p_imu->frontend_init_v4_initialized()?"POST_PROPAGATION":"INIT_PENDING",integrity_group_cloud_id-1,integrity_group_cloud_stamp,Measures.lidar_beg_time,Measures.lidar_end_time,
+              Measures.imu.empty()?0:offline_handoff::stamp_ns(Measures.imu.back()->header.stamp),state_point,p_imu->acceleration_scale(),p_imu->normalization_mean(),std::llround(p_imu->state_time()*1e9));
+            if(runtime_state_log_enabled_v4_ && !runtime_was_initialized_v4 && p_imu->frontend_init_v4_initialized())
+            {
+                const auto group_last_v4=static_cast<std::int64_t>(Measures.imu.back()->header.stamp.sec)*1000000000LL+Measures.imu.back()->header.stamp.nanosec;
+                const auto &window_v4=p_imu->frontend_init_v4_stats();
+                // Strict gate uses exactly its committed accepted last IMU.
+                // Legacy init has no exact gate window and is explicitly unverified.
+                const bool strict_v4=runtime_strict_gate_v4_;
+                const auto accepted_last_v4=strict_v4?window_v4.last_stamp_ns:0;
+                auto row_v4=frontend_runtime_v4::capture(p_imu->joint_committed()?frontend_runtime_v4::Stage::JointInitCommit:frontend_runtime_v4::Stage::InitCommit,
+                    std::llround(Measures.lidar_beg_time*1e9),std::llround(Measures.lidar_end_time*1e9),
+                    p_imu->joint_committed()?std::llround(Measures.lidar_end_time*1e9):(strict_v4?accepted_last_v4:group_last_v4),state_point);
+                row_v4.accepted_window_last_imu_ns=accepted_last_v4;
+                row_v4.group_last_imu_ns=group_last_v4;
+                row_v4.init_stamp_consistent=strict_v4 && accepted_last_v4==group_last_v4;
+                if(!row_v4.init_stamp_consistent&&!p_imu->joint_committed())
+                    RCLCPP_ERROR(this->get_logger(),"Runtime INIT_COMMIT source window not verified; do not treat as strict-ready evidence");
+                runtime_state_writer_v4_->push(row_v4);
+            }
+
+            if(!extrinsic_est_en && p_imu->frontend_init_v4_initialized()) {
+              const auto field_x=kf.get_x();
+              if((field_x.offset_T_L_I-Lidar_T_wrt_IMU).norm()>1e-10 ||
+                 (field_x.offset_R_L_I.toRotationMatrix()-Lidar_R_wrt_IMU).norm()>1e-10)
+                throw std::runtime_error("fixed extrinsic state changed; refusing continued mapping");
+            }
+            pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+
+            if (feats_undistort->empty() || (feats_undistort == NULL))
+            {
+                input_integrity->record((p_imu->frontend_init_v4_initialized()&&!p_imu->joint_committed())?IntegrityStage::EmptyCloud:IntegrityStage::InitSkip,integrity_group_cloud_stamp,integrity_group_cloud_id,integrity_group);
+                if (!flg_EKF_inited)
+                    RCLCPP_INFO(this->get_logger(), "Scan skipped while IMU initializes (expected at startup).");
+                else
+                    RCLCPP_WARN(this->get_logger(), "No point, skip this scan!");
+                return;
+            }
+
+            flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? \
+                            false : true;
+            /*** Segment the map in lidar FOV ***/
+            lasermap_fov_segment();
+
+            /*** downsample the feature points in a scan ***/
+            downSizeFilterSurf.setInputCloud(feats_undistort);
+            downSizeFilterSurf.filter(*feats_down_body);
+            t1 = omp_get_wtime();
+            feats_down_size = feats_down_body->points.size();
+            /*** initialize the map kdtree ***/
+            if(ikdtree.Root_Node == nullptr)
+            {
+                input_integrity->record(IntegrityStage::TreeInit,integrity_group_cloud_stamp,integrity_group_cloud_id,integrity_group);
+                RCLCPP_INFO(this->get_logger(), "Initialize the map kdtree");
+                if(feats_down_size > 5)
+                {
+                    ikdtree.set_downsample_param(filter_size_map_min);
+                    feats_down_world->resize(feats_down_size);
+                    for(int i = 0; i < feats_down_size; i++)
+                    {
+                        pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
+                    }
+                    ikdtree.Build(feats_down_world->points);
+                }
+                return;
+            }
+            int featsFromMapNum = ikdtree.validnum();
+            kdtree_size_st = ikdtree.size();
+            
+            // cout<<"[ mapping ]: In num: "<<feats_undistort->points.size()<<" downsamp "<<feats_down_size<<" Map num: "<<featsFromMapNum<<"effect num:"<<effct_feat_num<<endl;
+
+            /*** ICP and iterated Kalman filter update ***/
+            if (feats_down_size < 5)
+            {
+                input_integrity->record(IntegrityStage::FewFeatures,integrity_group_cloud_stamp,integrity_group_cloud_id,integrity_group);
+                RCLCPP_WARN(this->get_logger(), "No point, skip this scan!\n");
+                return;
+            }
+            
+            normvec->resize(feats_down_size);
+            feats_down_world->resize(feats_down_size);
+
+            if (runtime_pos_log)
+            {
+                V3D ext_euler_pre = SO3ToEuler(state_point.offset_R_L_I);
+                fout_pre<<setw(20)<<Measures.lidar_beg_time - first_lidar_time<<" "<<euler_cur.transpose()<<" "<< state_point.pos.transpose()<<" "<<ext_euler_pre.transpose() << " "<<state_point.offset_T_L_I.transpose()<< " " << state_point.vel.transpose() \
+                <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<< endl;
+            }
+
+            if(0) // If you need to see map point, change to "if(1)"
+            {
+                PointVector ().swap(ikdtree.PCL_Storage);
+                ikdtree.flatten(ikdtree.Root_Node, ikdtree.PCL_Storage, NOT_RECORD);
+                featsFromMap->clear();
+                featsFromMap->points = ikdtree.PCL_Storage;
+            }
+
+            pointSearchInd_surf.resize(feats_down_size);
+            Nearest_Points.resize(feats_down_size);
+            int  rematch_num = 0;
+            bool nearest_search_en = true; //
+
+            t2 = omp_get_wtime();
+            
+            /*** iterated state estimation ***/
+            double t_update_start = omp_get_wtime();
+            double solve_H_time = 0;
+            kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
+            state_point = kf.get_x();
+            if(offline_consume::output)offline_consume::output->stage("POST_LIDAR_UPDATE",integrity_group_cloud_id-1,integrity_group_cloud_stamp,Measures.lidar_beg_time,Measures.lidar_end_time,
+              Measures.imu.empty()?0:offline_handoff::stamp_ns(Measures.imu.back()->header.stamp),state_point,p_imu->acceleration_scale(),p_imu->normalization_mean(),std::llround(p_imu->state_time()*1e9),effct_feat_num);
+
+            input_integrity->record(IntegrityStage::Post,integrity_group_cloud_stamp,integrity_group_cloud_id,integrity_group);
+            if(runtime_state_log_enabled_v4_)
+            {
+                // Capture immediately after actual lidar update and get_x,
+                // before any publish/map operation or next Process can change it.
+                auto row_v4=frontend_runtime_v4::capture(frontend_runtime_v4::Stage::PostLidarUpdate,
+                    std::llround(Measures.lidar_beg_time*1e9),std::llround(Measures.lidar_end_time*1e9),
+                    std::llround(Measures.lidar_end_time*1e9),state_point);
+                row_v4.lidar_effective_features=effct_feat_num;
+                row_v4.group_last_imu_ns=Measures.imu.empty()?0:offline_handoff::stamp_ns(Measures.imu.back()->header.stamp);
+                runtime_state_writer_v4_->push(row_v4);
+            }
+
+            euler_cur = SO3ToEuler(state_point.rot);
+            if(!extrinsic_est_en && p_imu->frontend_init_v4_initialized()) {
+              const auto field_x=kf.get_x();
+              if((field_x.offset_T_L_I-Lidar_T_wrt_IMU).norm()>1e-10 ||
+                 (field_x.offset_R_L_I.toRotationMatrix()-Lidar_R_wrt_IMU).norm()>1e-10)
+                throw std::runtime_error("fixed extrinsic state changed; refusing continued mapping");
+            }
+            pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+            geoQuat.x = state_point.rot.coeffs()[0];
+            geoQuat.y = state_point.rot.coeffs()[1];
+            geoQuat.z = state_point.rot.coeffs()[2];
+            geoQuat.w = state_point.rot.coeffs()[3];
+
+            double t_update_end = omp_get_wtime();
+
+            offline_handoff::event("post_lidar_update",std::llround(Measures.lidar_end_time*1e9),effct_feat_num,"derived_measuregroup_ns");
+            if(!offline_consume::output)require_output_edges();
+            /******* Publish odometry *******/
+            if(!offline_consume::output)publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+
+            /*** add the feature points to map kdtree ***/
+            t3 = omp_get_wtime();
+            map_incremental();
+            t5 = omp_get_wtime();
+            
+            /******* Publish points *******/
+            if(offline_consume::output)offline_consume::output->post(integrity_group_cloud_id-1,integrity_group_cloud_stamp,Measures.lidar_beg_time,Measures.lidar_end_time,state_point,*feats_undistort);
+            if (!offline_consume::output&&path_en) publish_path(pubPath_);
+            if (!offline_consume::output&&(scan_pub_en || pcd_save_en)) publish_frame_world(pubLaserCloudFull_);
+            if (!offline_consume::output&&scan_pub_en && scan_body_pub_en) publish_frame_body(pubLaserCloudFull_body_);
+            if (!offline_consume::output&&effect_pub_en) publish_effect_world(pubLaserCloudEffect_);
+            // if (map_pub_en) publish_map(pubLaserCloudMap_);
+
+            /*** Debug variables ***/
+            if (runtime_pos_log)
+            {
+                frame_num ++;
+                kdtree_size_end = ikdtree.size();
+                aver_time_consu = aver_time_consu * (frame_num - 1) / frame_num + (t5 - t0) / frame_num;
+                aver_time_icp = aver_time_icp * (frame_num - 1)/frame_num + (t_update_end - t_update_start) / frame_num;
+                aver_time_match = aver_time_match * (frame_num - 1)/frame_num + (match_time)/frame_num;
+                aver_time_incre = aver_time_incre * (frame_num - 1)/frame_num + (kdtree_incremental_time)/frame_num;
+                aver_time_solve = aver_time_solve * (frame_num - 1)/frame_num + (solve_time + solve_H_time)/frame_num;
+                aver_time_const_H_time = aver_time_const_H_time * (frame_num - 1)/frame_num + solve_time / frame_num;
+                if (time_log_counter < MAXN)
+                {
+                    T1[time_log_counter] = Measures.lidar_beg_time;
+                    s_plot[time_log_counter] = t5 - t0;
+                    s_plot2[time_log_counter] = feats_undistort->points.size();
+                    s_plot3[time_log_counter] = kdtree_incremental_time;
+                    s_plot4[time_log_counter] = kdtree_search_time;
+                    s_plot5[time_log_counter] = kdtree_delete_counter;
+                    s_plot6[time_log_counter] = kdtree_delete_time;
+                    s_plot7[time_log_counter] = kdtree_size_st;
+                    s_plot8[time_log_counter] = kdtree_size_end;
+                    s_plot9[time_log_counter] = aver_time_consu;
+                    s_plot10[time_log_counter] = add_point_size;
+                    time_log_counter ++;
+                }
+                printf("[ mapping ]: time: IMU + Map + Input Downsample: %0.6f ave match: %0.6f ave solve: %0.6f  ave ICP: %0.6f  map incre: %0.6f ave total: %0.6f icp: %0.6f construct H: %0.6f \n",t1-t0,aver_time_match,aver_time_solve,t3-t1,t5-t3,aver_time_consu,aver_time_icp, aver_time_const_H_time);
+                V3D ext_euler = SO3ToEuler(state_point.offset_R_L_I);
+                fout_out << setw(20) << Measures.lidar_beg_time - first_lidar_time << " " << euler_cur.transpose() << " " << state_point.pos.transpose()<< " " << ext_euler.transpose() << " "<<state_point.offset_T_L_I.transpose()<<" "<< state_point.vel.transpose() \
+                <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<<" "<<feats_undistort->points.size()<<endl;
+                dump_lio_state_to_log(fp);
+            }
+        }
+    }
+
+    void map_publish_callback()
+    {
+        if (map_pub_en) publish_map(pubLaserCloudMap_);
+    }
+
+    // std_srvs/Trigger callback exposed at the `map_save` service.
+    // Mirrors the ROS 1 branch behaviour so external tools can flush
+    // the accumulated PCD without having to shut the node down.
+    void map_save_callback(std_srvs::srv::Trigger::Request::ConstSharedPtr /*req*/, std_srvs::srv::Trigger::Response::SharedPtr res)
+    {
+        if (!pcd_save_en)
+        {
+            res->success = false;
+            res->message = "pcd_save_en is false; enable it in yaml to use /map_save.";
+            RCLCPP_WARN(this->get_logger(), "[map_save] %s", res->message.c_str());
+            return;
+        }
+        if (pcl_wait_save->empty())
+        {
+            res->success = false;
+            res->message = "No points buffered yet; let FAST-LIO2 run for a while first.";
+            RCLCPP_WARN(this->get_logger(), "[map_save] %s", res->message.c_str());
+            return;
+        }
+
+        std::string saved_path;
+        if (save_to_pcd(saved_path))
+        {
+            res->success = true;
+            res->message = "Saved " + std::to_string(pcl_wait_save->size()) + " points to " + saved_path;
+            RCLCPP_INFO(this->get_logger(), "[map_save] %s", res->message.c_str());
+        }
+        else
+        {
+            res->success = false;
+            res->message = "Failed to write PCD to " + saved_path;
+            RCLCPP_ERROR(this->get_logger(), "[map_save] %s", res->message.c_str());
+        }
+    }
+
+private:
+    const std::string required_observer_name_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_body_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudEffect_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudMap_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
+
+    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    rclcpp::TimerBase::SharedPtr handoff_timer_;
+    rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::TimerBase::SharedPtr map_pub_timer_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
+
+    bool effect_pub_en = false, map_pub_en = false;
+    int effect_feat_num = 0, frame_num = 0;
+    double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
+    bool flg_EKF_converged, EKF_stop_flg = 0;
+    double epsi[23] = {0.001};
+
+    bool runtime_state_log_enabled_v4_{false},runtime_strict_gate_v4_{false};
+    std::string offline_bag_;double offline_max_seconds_{0};
+    std::unique_ptr<frontend_runtime_v4::Writer> runtime_state_writer_v4_;
+    FILE *fp = NULL;
+    ofstream fout_pre, fout_out, fout_dbg;
+};
+
+int main(int argc, char** argv)
+{
+    // Signal handlers only set a sig_atomic_t flag. ROS remains valid while
+    // the current single-thread callback finishes, including its final output.
+    std::signal(SIGINT, SigHandle);
+    std::signal(SIGTERM, SigHandle);
+    try { offline_handoff::start("frontend"); } catch(const std::exception& e) { std::cerr<<e.what()<<"\n"; return 2; }
+    try {input_integrity=std::make_unique<frontend_integrity::Trace>(offline_handoff::trace->directory());}
+    catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 2;}
+    std::shared_ptr<LaserMappingNode> node;
+    bool runtime_enabled=false,runtime_closed=false,runtime_flush_ok=false;
+    try {
+        rclcpp::init(argc, argv, rclcpp::InitOptions(), rclcpp::SignalHandlerOptions::None);
+        node=std::make_shared<LaserMappingNode>();
+        if(node->consumes_bag())node->run_consumption();
+        rclcpp::executors::SingleThreadedExecutor executor;
+        executor.add_node(node);
+        while(rclcpp::ok()&&frontend_lifecycle.accepts_work()) {
+            observe_stop_request();
+            if(frontend_lifecycle.accepts_work())executor.spin_once(std::chrono::milliseconds(50));
+        }
+        observe_stop_request();
+        if(frontend_lifecycle.accepts_work())frontend_lifecycle.fail("ROS context stopped unexpectedly");
+        node->stop_new_tasks();
+        executor.remove_node(node);
+    } catch(const std::exception& error) {
+        frontend_lifecycle.fail(std::string("frontend executor/startup: ")+error.what());
+    } catch(...) {
+        frontend_lifecycle.fail("frontend executor/startup: unknown exception");
+    }
+    observe_stop_request();
+    frontend_lifecycle.request_stop("executor_returned");
+    if(node) {
+        try {node->stop_new_tasks();}
+        catch(const std::exception& error) {frontend_lifecycle.fail(std::string("stop tasks: ")+error.what());}
+    }
+    try {offline_handoff::event("frontend_stopping",0,frontend_lifecycle.signal(),frontend_lifecycle.error().empty()?"graceful":"error");}
+    catch(const std::exception& error) {frontend_lifecycle.fail(error.what());}
+
+    try {
+    /**************** save map ****************/
+    /* 1. make sure you have enough memories
+    /* 2. pcd save will largely influence the real-time performences **/
+    if (pcd_save_en && pcd_save_dirty)
+    {
+        std::string saved_path;
+        if (save_to_pcd(saved_path)) {
+            cout << "[map_save] final map saved to " << saved_path << endl;
+        } else {
+            cout << "[map_save] nothing saved on exit: point buffer is empty." << endl;
+        }
+    }
+
+    if (runtime_pos_log)
+    {
+        vector<double> t, s_vec, s_vec2, s_vec3, s_vec4, s_vec5, s_vec6, s_vec7;    
+        FILE *fp2;
+        string log_dir = root_dir + "/Log/fast_lio_time_log.csv";
+        fp2 = fopen(log_dir.c_str(),"w");
+        if(!fp2)throw std::runtime_error("cannot open final timing log");
+        fprintf(fp2,"time_stamp, total time, scan point size, incremental time, search time, delete size, delete time, tree size st, tree size end, add point size, preprocess time\n");
+        for (int i = 0;i<time_log_counter; i++){
+            fprintf(fp2,"%0.8f,%0.8f,%d,%0.8f,%0.8f,%d,%0.8f,%d,%d,%d,%0.8f\n",T1[i],s_plot[i],int(s_plot2[i]),s_plot3[i],s_plot4[i],int(s_plot5[i]),s_plot6[i],int(s_plot7[i]),int(s_plot8[i]), int(s_plot10[i]), s_plot11[i]);
+            t.push_back(T1[i]);
+            s_vec.push_back(s_plot9[i]);
+            s_vec2.push_back(s_plot3[i] + s_plot6[i]);
+            s_vec3.push_back(s_plot4[i]);
+            s_vec5.push_back(s_plot[i]);
+        }
+        fclose(fp2);
+    }
+    } catch(const std::exception& error) {
+        frontend_lifecycle.fail(std::string("final output: ")+error.what());
+    }
+    if(node) {
+        node->close_traces();
+        runtime_enabled=node->runtime_trace_enabled();
+        runtime_closed=node->runtime_trace_closed();
+        runtime_flush_ok=node->runtime_trace_flush_ok();
+        if(!runtime_closed||!runtime_flush_ok)frontend_lifecycle.fail("frontend runtime trace incomplete or flush failed");
+    }
+    // Close both writers before destroying the node/context. No callback can
+    // run after spin_once returns and stop_new_tasks cancels its entry points.
+    if(!close_input_trace_v4())frontend_lifecycle.fail("input CSV incomplete: overflow/write/close failure");
+    if(!input_integrity->close(integrity_snapshot()))frontend_lifecycle.fail("frontend input integrity overflow/write failure");
+    try {offline_handoff::trace->close();}
+    catch(const std::exception& error) {frontend_lifecycle.fail(error.what());}
+    if(!offline_handoff::trace->flush_ok())frontend_lifecycle.fail("frontend handoff trace incomplete or flush failed");
+    node.reset();
+    try {if(rclcpp::ok())rclcpp::shutdown();}
+    catch(const std::exception& error) {frontend_lifecycle.fail(std::string("ROS shutdown: ")+error.what());}
+    frontend_lifecycle.stopped();
+    try {offline_handoff::write_exit_status(frontend_lifecycle,runtime_enabled,runtime_closed,runtime_flush_ok);}
+    catch(const std::exception& error) {
+        frontend_lifecycle.fail(error.what());
+        std::cerr<<"frontend exit status could not be persisted: "<<error.what()<<'\n';
+    }
+    if(!frontend_lifecycle.error().empty())std::cerr<<frontend_lifecycle.error()<<'\n';
+    return frontend_lifecycle.exit_code();
+}
