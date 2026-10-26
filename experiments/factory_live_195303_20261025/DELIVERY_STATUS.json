@@ -1,0 +1,24 @@
+{
+  "schema": "factory_live_195303_source_delivery_v1",
+  "sensor_input": {
+    "imu": 355087,
+    "clouds": 17778,
+    "post": 17765,
+    "callback_missing": 0,
+    "callback_unexpected": 0
+  },
+  "keyframes": 1841,
+  "map_points": 15452713,
+  "loop_committed": 3,
+  "complete_input": true,
+  "normal_exit": true,
+  "bundle_manifest_checked": true,
+  "joint_initialization_enabled": false,
+  "user_fixed_extrinsic": true,
+  "physical_calibration": "NOT_CERTIFIED",
+  "geometry_acceptance": "MIXED_NOT_CERTIFIED",
+  "absolute_height_accuracy": "UNKNOWN",
+  "real_time_dds_hardware_navigation": "NOT_RUN",
+  "repeat": "NOT_RUN",
+  "bags_maps_logs_binaries_included": false
+}

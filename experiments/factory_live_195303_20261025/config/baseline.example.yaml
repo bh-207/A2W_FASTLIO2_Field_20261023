@@ -1,0 +1,113 @@
+# Disabled public template; audited SI/frame/time evidence must be supplied locally. Do not bypass the real input or initialization gates.
+/laser_mapping:
+  ros__parameters:
+    common:
+      imu_gyr_unit: rad
+      imu_topic: /lidar_imu
+      lid_topic: /lidar_points
+      time_offset_lidar_to_imu: 0.0
+      time_sync_en: false
+    cube_side_length: 1000.0
+    feature_extract_enable: false
+    field_capture:
+      imu_depth: 100
+    filter_size_corner: 0.5
+    filter_size_map: 0.3
+    filter_size_surf: 0.5
+    frontend_init_v4:
+      accel_unit_evidence: ''
+      accel_variance_limit: 0.04
+      async_input_trace: false
+      gyro_unit_evidence: ''
+      gyro_variance_limit: 1.0e-05
+      input_accel_unit: m/s^2
+      input_gyro_unit: rad/s
+      input_imu_frame: hesai_imu_aligned
+      input_interface_enabled: false
+      input_trace_path: '@SESSION@/input.csv'
+      input_trace_queue_capacity: 4096
+      maximum_accel_norm_m_s2: 10.6
+      maximum_direction_change_rad: 0.02
+      maximum_gap_s: 0.02
+      maximum_gyro_norm_rad_s: 0.05
+      maximum_mean_gyro_norm_rad_s: 0.02
+      minimum_accel_norm_m_s2: 9.0
+      minimum_duration_s: 1.0
+      minimum_samples: 200
+      quality_gate_enabled: true
+      quality_trace_path: '@SESSION@/init_quality.csv'
+      runtime_state_log_capacity: 1024
+      runtime_state_log_enabled: true
+      runtime_state_log_path: '@SESSION@/runtime_state.csv'
+      source_provenance: unknown
+      state_candidate_preservation_tolerance: 1.0e-12
+      state_covariance_symmetry_tolerance: 1.0e-10
+      state_gravity_norm_tolerance_m_s2: 1.0e-06
+      state_initial_rotation_identity_tolerance: 1.0e-08
+      state_maximum_last_accel_residual_m_s2: 0.25
+      state_maximum_mean_accel_residual_m_s2: 0.05
+      state_minimum_covariance_pivot: 0.0
+      state_quaternion_norm_tolerance: 1.0e-06
+      state_rotation_determinant_tolerance: 1.0e-06
+      state_rotation_orthogonality_tolerance: 1.0e-06
+      time_offset_evidence: ''
+      joint_initialization_enabled: false
+    map_file_path: ''
+    mapping:
+      acc_cov: 0.1
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      det_range: 50.0
+      extrinsic_R:
+      - 1.0
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+      extrinsic_T:
+      - -0.00862
+      - 0.00914
+      - 0.03916
+      extrinsic_est_en: false
+      fov_degree: 360.0
+      gyr_cov: 0.1
+    max_iteration: 3
+    pcd_save:
+      interval: -1
+      leaf_size: 0.0
+      pcd_save_en: false
+    point_filter_num: 6
+    preprocess:
+      blind: 0.5
+      lidar_type: 2
+      scan_line: 128
+      scan_rate: 10
+      timestamp_unit: 0
+    publish:
+      dense_publish_en: true
+      effect_map_en: false
+      map_en: false
+      path_en: true
+      scan_bodyframe_pub_en: true
+      scan_publish_en: true
+    qos_overrides:
+      /parameter_events:
+        publisher:
+          depth: 1000
+          durability: volatile
+          history: keep_last
+          reliability: reliable
+      /tf:
+        publisher:
+          depth: 100
+          durability: volatile
+          history: keep_last
+          reliability: reliable
+    runtime_pos_log_enable: false
+    trajectory_save:
+      tum_en: false
+    use_sim_time: false

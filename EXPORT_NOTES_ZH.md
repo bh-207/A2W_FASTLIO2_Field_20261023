@@ -1,3 +1,5 @@
+> **2026-10-26最新源码：** [完整新Bag回放与PCD分析](experiments/factory_live_195303_20261025/PUBLIC_EXPORT_ZH.md)；[独立运动参考及拒绝候选](experiments/field_z_motion_reference_20261024/PUBLIC_EXPORT_ZH.md)。完整建图已完成；几何改善未整体验收，联合初始化继续关闭。原始数据不随源码上传。
+
 > 2026-10-24新增离线源码交付见 experiments/field_frontend_z_init_20261024/PUBLIC_EXPORT_ZH.md；真实联合候选未启用，未认证几何改善或原速。现场档案与数据仍排除。下文保留历史快照边界。
 
 > 新增2026-10-23独立修复入口见 experiments/field_backend_repair_20261023/README.md；下文为原现场快照历史边界，旧入口未被原位覆盖。现场接口档案、Bag、地图与运行日志继续排除。

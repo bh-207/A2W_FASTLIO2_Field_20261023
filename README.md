@@ -1,3 +1,5 @@
+> **2026-10-26最新源码：** [完整新Bag回放与PCD分析](experiments/factory_live_195303_20261025/PUBLIC_EXPORT_ZH.md)；[独立运动参考及拒绝候选](experiments/field_z_motion_reference_20261024/PUBLIC_EXPORT_ZH.md)。完整建图已完成；几何改善未整体验收，联合初始化继续关闭。原始数据不随源码上传。
+
 > **2026-10-24最新离线源码：** [完整输入重建、Z来源与联合初始化](experiments/field_frontend_z_init_20261024/PUBLIC_EXPORT_ZH.md)。完整同输入重建已完成；真实联合初始化候选被拒绝并回退，几何改善未通过，新功能默认关闭。
 
 > **最新独立修复入口：** [828KF后端与退出修复](experiments/field_backend_repair_20261023/README.md)。工程短程回归通过；候选整体几何及全长原速完整性仍FAIL，未切生产。

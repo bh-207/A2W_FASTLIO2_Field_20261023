@@ -1,0 +1,31 @@
+/**:
+  ros__parameters:
+    # Explicit experiment profile. The production launch still loads loop_validation.yaml.
+    # NOT PRODUCTION-ACCEPTED (2026-10-20): the 1490-frame offline replay improved
+    # first-revisit detection, but regressed some fixed non-ground seams and
+    # exceeded the measured keyframe processing budget. Do not enable this
+    # profile for production mapping merely because it produces more loops.
+    # All original geometric limits are identical to that production profile.
+    loop_validation:
+      maximum_fitness: 0.25
+      minimum_overlap: 0.35
+      minimum_correspondences: 30
+      maximum_translation_jump_m: 5.0
+      maximum_rotation_jump_rad: 1.0
+      minimum_candidate_distance_separation: 0.05
+    loop_pipeline:
+      revisit_verification_enabled: true
+      origin_keyframe_count: 31
+      origin_top_k: 5
+      hypothesis_group_id_span: 10
+      hypothesis_group_distance_m: 3.0
+      solution_merge_distance_m: 0.5
+      solution_merge_rotation_rad: 0.1
+      # This separate geometric fitness difference is measured in metres.
+      # The legacy 0.05 Scan Context descriptor gap remains dimensionless.
+      distinct_solution_fitness_margin_m: 0.05
+      confirmation_frames: 2
+      confirmation_max_gap: 10
+      retry_interval_keyframes: 2
+      retry_max_attempts: 3
+      retry_reset_keyframes: 30

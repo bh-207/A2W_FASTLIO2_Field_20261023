@@ -1,0 +1,28 @@
+# Offline manual replay only; production launch does not load this profile.
+experiment_status: NOT_ACCEPTED
+replay_mode: scheduled_cached
+inherits: loop_revisit_v3_experiment.yaml
+quatro:
+  feature_cache_capacity: 16
+  key: ordered_exact_XYZI_content_and_immutable_adapter_feature_parameters
+  collision_check: exact_snapshot_bytes
+  policy: bounded_LRU
+  fine_only: false
+resources:
+  OMP_NUM_THREADS: 4
+  OMP_THREAD_LIMIT: 4
+  OPENBLAS_NUM_THREADS: 1
+  note: OpenMP_limit_is_not_total_process_thread_count
+replay:
+  A2W_REPLAY_PACE: 1
+  source: preloaded_original_keyframe_stamps
+  continuous_input_queue_capacity: 32
+  event_log: every_actual_arrival_and_dequeue
+  overflow: fail_preserve_input_archive
+  ROS_online_acceptance: false
+quality:
+  original_validation_limits: unchanged
+  all_competitors: mandatory_before_positive_commit
+  gravity_or_roof_preprocessing: unchanged
+  raw_submap_or_fine_only_promotion: false
+  note: Semantic_and_map_quality_acceptance_remain_experimental

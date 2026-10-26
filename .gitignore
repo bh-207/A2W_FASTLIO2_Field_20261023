@@ -83,3 +83,8 @@ cyclonedds.xml
 # Local audited field interface evidence is never part of the public source export
 /experiments/field_frontend_z_init_20261024/config/baseline.yaml
 /experiments/field_frontend_z_init_20261024/source/config/field_input_contract.json
+
+# Audited local field evidence and independent experimental builds
+/experiments/factory_live_195303_20261025/config/baseline.yaml
+/experiments/factory_live_195303_20261025/source/config/field_input_contract.json
+/experiments/field_z_motion_reference_20261024/build/
