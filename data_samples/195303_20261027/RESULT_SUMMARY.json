@@ -1,0 +1,30 @@
+{
+  "input_bag": "factory_live_20261024_195303_YOI7fO",
+  "source_duration_s": 1777.761539145,
+  "source_input_counts": {
+    "imu": 355087,
+    "cloud": 17778
+  },
+  "keyframes": 1841,
+  "post": 17765,
+  "committed_loops": [
+    {
+      "source": 1736,
+      "target": 11
+    },
+    {
+      "source": 1753,
+      "target": 23
+    },
+    {
+      "source": 1779,
+      "target": 50
+    }
+  ],
+  "native_full_map_points": 15452713,
+  "complete_run": true,
+  "geometry_acceptance": "MIXED_NOT_CERTIFIED",
+  "physical_calibration": "USER_FIXED_NOT_CERTIFIED",
+  "repeat": "NOT_RUN",
+  "real_time": "NOT_RUN"
+}

@@ -1,0 +1,148 @@
+{
+  "schema": "a2w_selected_public_data_v1",
+  "source_bag": "factory_live_20261024_195303_YOI7fO",
+  "source_metadata_sha256": "4bac047a535afd748c883fd984a04ecce92540373a3a059c7402ec1f4957c4aa",
+  "source_topics": [
+    "/lidar_points",
+    "/lidar_imu"
+  ],
+  "source_complete_record_counts": {
+    "imu": 355087,
+    "cloud": 17778
+  },
+  "clips": [
+    {
+      "name": "initialization",
+      "source_relative_record_interval_s": [
+        0.0,
+        1.6
+      ],
+      "record_ns_interval": [
+        1792842785503447097,
+        1792842787103447097
+      ],
+      "selection": "original start and initialization-scale raw input; short segment, not full-map replay",
+      "topics": {
+        "/lidar_imu": 329,
+        "/lidar_points": 16
+      },
+      "serialized_record_order_and_payload_hashes_equal": true,
+      "header_and_point_fields": "unchanged serialized payload",
+      "archive_bytes": 12193107,
+      "archive_sha256": "5ce93e47503d6174610a104515edc14d4ffcd4e114ffdd60a8d60cf2a16af191",
+      "archive_members": [
+        "initialization_0.mcap",
+        "metadata.yaml"
+      ]
+    },
+    {
+      "name": "mid_route",
+      "source_relative_record_interval_s": [
+        800.0,
+        800.25
+      ],
+      "record_ns_interval": [
+        1792843585503447097,
+        1792843585753447097
+      ],
+      "selection": "fixed middle-of-record window selected by time, no quality-based rejection",
+      "topics": {
+        "/lidar_imu": 71,
+        "/lidar_points": 3
+      },
+      "serialized_record_order_and_payload_hashes_equal": true,
+      "header_and_point_fields": "unchanged serialized payload",
+      "archive_bytes": 2415059,
+      "archive_sha256": "55400cade991fdf8febda9be3d718a2ff0d0896b8acf5dc07d9230c3e71fd48e",
+      "archive_members": [
+        "metadata.yaml",
+        "mid_route_0.mcap"
+      ]
+    },
+    {
+      "name": "late_return",
+      "source_relative_record_interval_s": [
+        1650.0,
+        1650.25
+      ],
+      "record_ns_interval": [
+        1792844435503447097,
+        1792844435753447097
+      ],
+      "selection": "fixed late-record window near recorded return period; physical place not independently certified",
+      "topics": {
+        "/lidar_imu": 70,
+        "/lidar_points": 3
+      },
+      "serialized_record_order_and_payload_hashes_equal": true,
+      "header_and_point_fields": "unchanged serialized payload",
+      "archive_bytes": 2263033,
+      "archive_sha256": "379827c9e76f7f4dcf8f36c7235f2628b5090e086bc2d13d11644bc033b516a7",
+      "archive_members": [
+        "late_return_0.mcap",
+        "metadata.yaml"
+      ]
+    }
+  ],
+  "maps": [
+    {
+      "file": "raw_same_identity_preview.pcd.gz",
+      "frame": "camera_init",
+      "points": 154764,
+      "fields": [
+        "x",
+        "y",
+        "z"
+      ],
+      "bytes": 1658137,
+      "source_npz_sha256": "af994569c4dcb0f0611cf0e931c0c0ab7e3a845ac5fde70210c29e782dccb2d3",
+      "serialized_roundtrip": true,
+      "max_float32_rounding_m": 1.5258206019552745e-05,
+      "geometry_transform": "none",
+      "native_full_points": 15452713,
+      "is_complete_native_map": false,
+      "is_map_bundle": false
+    },
+    {
+      "file": "optimized_same_identity_preview.pcd.gz",
+      "frame": "map",
+      "points": 154764,
+      "fields": [
+        "x",
+        "y",
+        "z"
+      ],
+      "bytes": 1656952,
+      "source_npz_sha256": "af994569c4dcb0f0611cf0e931c0c0ab7e3a845ac5fde70210c29e782dccb2d3",
+      "serialized_roundtrip": true,
+      "max_float32_rounding_m": 1.5258263090345281e-05,
+      "geometry_transform": "none",
+      "native_full_points": 15452713,
+      "is_complete_native_map": false,
+      "is_map_bundle": false
+    }
+  ],
+  "scope": "selected raw serialized Bag samples and full-route display previews; NOT full raw Bag or Map Bundle backup",
+  "map_selection": "already-frozen same-identity visualization; no result-dependent crop or alignment",
+  "extrinsic": {
+    "rotation": [
+      1,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      1
+    ],
+    "translation_m": [
+      -0.00862,
+      0.00914,
+      0.03916
+    ],
+    "estimate": false,
+    "source": "user specified, not certified calibration"
+  },
+  "full_input_needed_to_reproduce_native_map": true
+}

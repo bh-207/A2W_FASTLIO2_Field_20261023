@@ -1,0 +1,470 @@
+{
+  "name": "mid_route",
+  "source_relative_record_interval_s": [
+    800.0,
+    800.25
+  ],
+  "record_ns_interval": [
+    1792843585503447097,
+    1792843585753447097
+  ],
+  "selection": "fixed middle-of-record window selected by time, no quality-based rejection",
+  "topics": {
+    "/lidar_imu": 71,
+    "/lidar_points": 3
+  },
+  "serialized_record_order_and_payload_hashes_equal": true,
+  "header_and_point_fields": "unchanged serialized payload",
+  "archive_bytes": 2415059,
+  "archive_sha256": "55400cade991fdf8febda9be3d718a2ff0d0896b8acf5dc07d9230c3e71fd48e",
+  "archive_members": [
+    "metadata.yaml",
+    "mid_route_0.mcap"
+  ],
+  "records": [
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585557509639,
+      "serialized_bytes": 332,
+      "payload_sha256": "351cf16c9c6dfaca8160c7445702e9c5a745413da2a559029145cfbea52bbf68"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585557834398,
+      "serialized_bytes": 332,
+      "payload_sha256": "255b801b5d095e22ac2abbe8900d5a3d91782421ba1b678c37fa9f5b7881c1bd"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585557857629,
+      "serialized_bytes": 332,
+      "payload_sha256": "d5fc73978f7060c13e1623f96052fc1980106cce45ed753ff62d975fc5315a82"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585558168088,
+      "serialized_bytes": 332,
+      "payload_sha256": "1eab6ca2e33bdb705e57e1f2022ea511ee67c517deae9841576d6511e7f11dfa"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585558208201,
+      "serialized_bytes": 332,
+      "payload_sha256": "d49b71e1811695719234f3ee933b4a1246fcaa0d415f21244896bbf425333298"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585558429595,
+      "serialized_bytes": 332,
+      "payload_sha256": "3440f85d39d2286d7857c044805f31c31b2a123047b99950aab5be6e36d821e5"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585558635141,
+      "serialized_bytes": 332,
+      "payload_sha256": "b4b5d567f8a5dd36e15d178a08379d588a22a99951f1de490b0957f9250651e0"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585558810684,
+      "serialized_bytes": 332,
+      "payload_sha256": "af15860608fdb78b4e3cb72cde8c4bfb05b3df02727338daf7a07c7681df5c44"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585559020693,
+      "serialized_bytes": 332,
+      "payload_sha256": "3873f17cae7448a31bc58fede83db3bf27c6a6ee33d62c3531ec78e752ad4df8"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585559293379,
+      "serialized_bytes": 332,
+      "payload_sha256": "9c4f52772b3553acc06f0c597a09eb0bc6b26d41b4f3cff43981599ce6203197"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585559328729,
+      "serialized_bytes": 332,
+      "payload_sha256": "63962e10c63c883e7d5d4479202079bac295e1e9f185c826a46fa46a286a23ce"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585559525239,
+      "serialized_bytes": 332,
+      "payload_sha256": "8834d7e9d1ae167d1cab3e37970b153c4461b06e5df0b9b03200d1cb87d14a27"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585559694476,
+      "serialized_bytes": 332,
+      "payload_sha256": "07d88d00938d0b5ba06d67910938425592dcec5de4d878dee3fc6b2605120b3f"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585559864180,
+      "serialized_bytes": 332,
+      "payload_sha256": "50e111f95202cbd258ebc15100b1f041688581267f132af5be9d7c5445e072aa"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585560051747,
+      "serialized_bytes": 332,
+      "payload_sha256": "e7836c20443e8e54321ecc18d0cbee03b3b5e107f8cbb045b52b0ee2d72dd6a4"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585560236726,
+      "serialized_bytes": 332,
+      "payload_sha256": "d8526f1fe1a4c57e8888d77ad3b2210bd9fe41e64fe6c52127e5f47893284378"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585560399223,
+      "serialized_bytes": 332,
+      "payload_sha256": "7ce15bb3d1fbd86da1b7d78b8e25511b6ba74a1d77967287f03706708653db7e"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585560581242,
+      "serialized_bytes": 332,
+      "payload_sha256": "024ee4ce48a273de09319a1e46691f2a9009c101ef2c1c83bad367818effe55e"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585560762311,
+      "serialized_bytes": 332,
+      "payload_sha256": "3a85c1992d5f81b3e34d9f6af81cb3a972205204a243831baad6cd11ac7d33ae"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585560903717,
+      "serialized_bytes": 332,
+      "payload_sha256": "5d41a3e824added8bb9ad108da2301f2cc0558a2f7a390befbcb5dddb17a8ad9"
+    },
+    {
+      "topic": "/lidar_points",
+      "record_ns": 1792843585608609296,
+      "serialized_bytes": 2995408,
+      "payload_sha256": "31c3c551057a55c4917ce4222b7b4d1df42edd8c6f16d27e68e9d4ac87460e2f"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585608661507,
+      "serialized_bytes": 332,
+      "payload_sha256": "c3a8e4ff6710ceb3a8d01873b9fa3377c037123892af96c2c4146b83821fafa2"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585608666075,
+      "serialized_bytes": 332,
+      "payload_sha256": "796b82f473a949822493f90f6e4f23e14af252d474fb4ffa08f6c9ede943ee2a"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585608669092,
+      "serialized_bytes": 332,
+      "payload_sha256": "0bd2c504fdf137ef501b5331b2215dbd36386ff8d3617fb96707d928aebdc7a6"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585610193404,
+      "serialized_bytes": 332,
+      "payload_sha256": "b5e890d7146cfd0e36752ac1643b51bed6e58d91c40dea9de97efd8a35ed3a26"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585610203222,
+      "serialized_bytes": 332,
+      "payload_sha256": "3eef1c62f67a2ad1db9d6a1ae317601917493350e8d4bfc23e4ea382d401330d"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585610206478,
+      "serialized_bytes": 332,
+      "payload_sha256": "5590db36374d042492e237a54d47984dd55ecc1fbba4f31299f0f6219c64c9a9"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585610486599,
+      "serialized_bytes": 332,
+      "payload_sha256": "f7ebe40d82730b8605b9173caf0cd62217dd7a1faa3a98307d37908727f3e203"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585610991080,
+      "serialized_bytes": 332,
+      "payload_sha256": "83644f0bf023aa68c169070b4d6278d9c65681b1770634a35e8e6a2baa687c32"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585611847543,
+      "serialized_bytes": 332,
+      "payload_sha256": "5e259ac96ecdb1ea20418e35a91dfc7524e14bc830dbcbac4b46a57c5d8ea1ff"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585612449009,
+      "serialized_bytes": 332,
+      "payload_sha256": "80a9a309f9b6cef003ad792dfbe86ddc6a23c7aa3c19f64cd25b9f91a223a27e"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585612938598,
+      "serialized_bytes": 332,
+      "payload_sha256": "c1a5508c13a9e7ac8fd5b7f0a19902cfd40a0f78986820decbdf5526dc4d14d5"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585613374551,
+      "serialized_bytes": 332,
+      "payload_sha256": "0310d711f0059b688fc42831f22506346a79a398c95cad127e1a8105e3aa8d57"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585613846585,
+      "serialized_bytes": 332,
+      "payload_sha256": "eaf2fcea21c97b1f71fd85e06be4c26aa3bb54e8c6b85d47adda4a7604082f0c"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585614302751,
+      "serialized_bytes": 332,
+      "payload_sha256": "1113b3463c8add59dbcc5a7295080a26094e83fb311f29fa5f2833583cc432e0"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585614747589,
+      "serialized_bytes": 332,
+      "payload_sha256": "cd360859fb1cf28467b6943022460288219aa385046dff0d797546be19e00573"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585615177103,
+      "serialized_bytes": 332,
+      "payload_sha256": "4ac7dadd0a661de03acf3a61580ea6fe7fc7dd50222d95464f5de8882f5a669e"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585615666608,
+      "serialized_bytes": 332,
+      "payload_sha256": "77592ae772e5df0888a154623805e3f4cdfa6b269dc14f1ffc68dfde32b81951"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585616102939,
+      "serialized_bytes": 332,
+      "payload_sha256": "672cdd6dd11b85e127433f12c71fa5be1e880b24b5b8cfed38498d21f2a407b2"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585616552844,
+      "serialized_bytes": 332,
+      "payload_sha256": "131b5b1f2aefdac1d22e21a6d52e9c4c8b0e440b13b28d86693f4df717d28802"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585616710140,
+      "serialized_bytes": 332,
+      "payload_sha256": "a269dde065dfd87a242efd4f3e74a473f9c60c6b415912538f982429f6b87edd"
+    },
+    {
+      "topic": "/lidar_points",
+      "record_ns": 1792843585665218805,
+      "serialized_bytes": 2995408,
+      "payload_sha256": "d6be32ea6b54d06158bd69c1c21ca563c5f225fabac367c4071f95d25d8611b8"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585665244202,
+      "serialized_bytes": 332,
+      "payload_sha256": "61327daf4210266b0e1895d0719158adc7669ec830d6241a515b096cdd590eb7"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585665248294,
+      "serialized_bytes": 332,
+      "payload_sha256": "345180577835639e790460d0932e2f0384c5a12b67a7d64b63c6ebb3e6842b9f"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585665251619,
+      "serialized_bytes": 332,
+      "payload_sha256": "5b1bc8e81fbea48b662abe2a76ca8ae108e44df745c55359bf4791ec96d8811d"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585665311114,
+      "serialized_bytes": 332,
+      "payload_sha256": "077e5f4201b367862507d4d74fb86c6e6216ac6516eb557152ca1422545ec383"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585665330664,
+      "serialized_bytes": 332,
+      "payload_sha256": "aa93953bfcffc442535b3eb7bf1416a73f99885cb750f87b6c0e39decc761ac1"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585665497613,
+      "serialized_bytes": 332,
+      "payload_sha256": "ee13d515c572187e679391735741228f90fbded17bd90d6bc964e3cf429dee16"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585665665300,
+      "serialized_bytes": 332,
+      "payload_sha256": "04247600d8cb9d871b94d9e4297af09ac410d025c5058c54f6a26b1504f8e8aa"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585665772191,
+      "serialized_bytes": 332,
+      "payload_sha256": "78931da5426b5a38415748027bb9474db06de7b7eb7d441b2f1b84f233197f32"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585665929035,
+      "serialized_bytes": 332,
+      "payload_sha256": "25f21f1060b3e5e7add95ecb62295b344bc3b059b3132cea56d25f1bc74e2272"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585666073072,
+      "serialized_bytes": 332,
+      "payload_sha256": "423093d54324b1851ee43e7c9d1712e0534d1e801aa9621e80c6c7a4022cb34c"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585666208008,
+      "serialized_bytes": 332,
+      "payload_sha256": "8578ef9416c4f6c1ff95486ca07a9e264c5fd50da5f43177951662439db73def"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585666378903,
+      "serialized_bytes": 332,
+      "payload_sha256": "b84062f76b4374dab86ee85c94b0270c4172469308418172b6f575f40b7a2e05"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585666465238,
+      "serialized_bytes": 332,
+      "payload_sha256": "2cc8c901552b4c3e2cbc184c9482caf48a9f241a697010ffe9cd99a137397cfa"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585673195427,
+      "serialized_bytes": 332,
+      "payload_sha256": "1b567f6e84674f29e43225e2af9ca5169558299ea2de0f0e28d34715e8c694db"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585673417342,
+      "serialized_bytes": 332,
+      "payload_sha256": "5b562d9a94b792793aead518474162c99f28b2eaeb51a1bacf245f4a5ea9eb10"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585677627834,
+      "serialized_bytes": 332,
+      "payload_sha256": "bfcf05dc74292321b9ca2050c2687ee15ace0f9937496160f375fdc135b1a269"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585683092674,
+      "serialized_bytes": 332,
+      "payload_sha256": "c113d53846c41f33da5740bfd3aa95c22ecaf2b8767781abd1273d3cc6275915"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585687521395,
+      "serialized_bytes": 332,
+      "payload_sha256": "fb09a6de976248b33f729dabfe2e5d7c87a82e9d32c996a4af962ab3a2ec909e"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585693069090,
+      "serialized_bytes": 332,
+      "payload_sha256": "7fe99f74518dbc4fb03e44ae4a3219988e33371be1d093065f0cd0343d316b86"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585697444857,
+      "serialized_bytes": 332,
+      "payload_sha256": "53419b2494a3181c8004439d24b37b73db0a8cdc3585da3dd87497388cf34182"
+    },
+    {
+      "topic": "/lidar_points",
+      "record_ns": 1792843585740981219,
+      "serialized_bytes": 2995408,
+      "payload_sha256": "464b9dd3f8496f6e348f6289105caa93d6a4cf8697840082dbc57b4c830788c2"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585741034842,
+      "serialized_bytes": 332,
+      "payload_sha256": "6f7d142b6507cc5c7e49ba685a73930a2ec7d9b1547e9d77cdf536900b02c4c4"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585741046412,
+      "serialized_bytes": 332,
+      "payload_sha256": "ebd63bb533cd1cc076b09e618da18901084a87d68ce30c42942dccad2472dc66"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585741056037,
+      "serialized_bytes": 332,
+      "payload_sha256": "9d4010e9cd9c3b3fba54ad2b846cd0ba114538f2286ead33acdfad54ee5fd70e"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585741065731,
+      "serialized_bytes": 332,
+      "payload_sha256": "e483604c2bd50b5ee134dc8ebb61cec174e455c4b7635b81b6df5bdab10aff8d"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585741074840,
+      "serialized_bytes": 332,
+      "payload_sha256": "cde66b33cfec0cbe92138cde85b4c9992f9f25136a9ab405dd349823566e55f6"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585741083745,
+      "serialized_bytes": 332,
+      "payload_sha256": "08ae52a71f165292a0d180e4213c707cbe982b98327383e37ea3c2395dcf70b5"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585741092811,
+      "serialized_bytes": 332,
+      "payload_sha256": "a3666c82f7ae215fd57364bf1f566144e7f26cb293b15cdbb5fea6e0eb1f72e9"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585741102481,
+      "serialized_bytes": 332,
+      "payload_sha256": "4eb1b71a7a9d5652658d0890ab934b0eebdf807e3e952088a93bd3172f7647c1"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585743842543,
+      "serialized_bytes": 332,
+      "payload_sha256": "7a2b502af128cf2eeeb168dd4d691163d215cb865e775f8812f57fb2f75cc22b"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585748233023,
+      "serialized_bytes": 332,
+      "payload_sha256": "d4c3904777831ae37e304866511a7fa4c70fb010601c5412aef3f756433c48ed"
+    },
+    {
+      "topic": "/lidar_imu",
+      "record_ns": 1792843585753295255,
+      "serialized_bytes": 332,
+      "payload_sha256": "d9d7317c06c036cd241c9875b905c987ba0cb20a5085f12e2b9839d598a89c93"
+    }
+  ]
+}
